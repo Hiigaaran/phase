@@ -1208,6 +1208,22 @@ fn parse_that_object_mana_value(input: &str) -> Result<(&str, ()), nom::Err<Orac
     Ok((rest, ()))
 }
 
+fn parse_chosen_name_reference_suffix(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = alt((
+        tag("which have the same name as the chosen "),
+        tag("which has the same name as the chosen "),
+        tag("that have the same name as the chosen "),
+        tag("that has the same name as the chosen "),
+        tag("with the same name as the chosen "),
+    ))
+    .parse(input)?;
+    let (rest, _) =
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
+    Ok((rest, ()))
+}
+
 fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
     match reference {
         TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
@@ -1439,6 +1455,12 @@ fn parse_search_filter_suffixes(
 
         if let Ok((rest, prop)) = parse_search_name_reference_suffix(remaining) {
             suffix.properties.push(prop);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, _)) = parse_chosen_name_reference_suffix(remaining) {
+            suffix.properties.push(FilterProp::SameNameAsParentTarget);
             remaining = rest.trim_start();
             continue;
         }
@@ -2612,6 +2634,24 @@ mod tests {
                 relation: SharedQualityRelation::Shares,
             } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
         )));
+    }
+
+    #[test]
+    fn parse_search_filter_same_name_as_chosen_object() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "basic land cards which have the same name as the chosen land",
+            &mut ctx,
+        );
+        assert!(ctx.diagnostics.is_empty());
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::SameNameAsParentTarget)));
     }
 
     #[test]
