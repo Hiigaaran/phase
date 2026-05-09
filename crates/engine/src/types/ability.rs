@@ -7223,10 +7223,11 @@ pub enum ReplacementCondition {
     /// "as long as ~ is tapped/untapped" — replacement applies only while the
     /// source object is in the required tapped state.
     SourceTappedState { tapped: bool },
-    /// CR 120.1: "dealt damage this turn by a source you controlled" — replacement applies
-    /// only to objects that were dealt damage this turn by a source controlled by the specified
-    /// player. Checks `damage_dealt_this_turn` records in game state.
-    DealtDamageThisTurnBySourceControlledBy { controller: ControllerRef },
+    /// CR 120.1 + CR 614.1a: Replacement applies only to objects that were
+    /// dealt damage this turn by a source matching the filter. Covers
+    /// source-controller gates and source-object gates such as "this creature"
+    /// or "enchanted creature" (CR 303.4m).
+    DealtDamageThisTurnBySource { source: TargetFilter },
     /// CR 109.5 + CR 614.1a: Replacement applies only when the event was caused by
     /// a source controlled by the specified player relative to the replacement source.
     /// Used by "an opponent controls causes you to discard this card" replacement effects.

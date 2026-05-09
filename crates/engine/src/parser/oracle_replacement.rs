@@ -186,7 +186,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // E.g., "If another creature would die, exile it instead." (Void Maw)
     //       "If a nontoken creature an opponent controls would die, exile it instead." (Valentin)
     //       "If a creature an opponent controls would die, exile it instead." (Vren)
-    if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &text) {
+    if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &normalized) {
         return Some(def);
     }
 
@@ -2034,31 +2034,23 @@ fn parse_creature_die_exile_replacement(
         prefix[..subject_end_in_prefix].trim()
     };
 
-    // Skip self-reference patterns — handled by the earlier "~ would die" check.
-    if subject_start.contains('~') {
+    let (subject_filter_text, replacement_condition) =
+        split_dealt_damage_subject_condition(subject_start).unwrap_or((subject_start, None));
+    let subject_filter_text = nom_primitives::parse_article
+        .parse(subject_filter_text)
+        .map_or(subject_filter_text, |(rest, _)| rest)
+        .trim();
+
+    // Skip self-reference subjects — handled by the earlier "~ would die" check.
+    if subject_filter_text.contains('~') {
         return None;
     }
 
     // Parse the subject filter (e.g., "another creature", "a nontoken creature an opponent controls")
-    // Also detect inline conditions like "dealt damage this turn by a source you controlled"
-    let (filter, subject_rest) = parse_type_phrase(subject_start);
-    if matches!(&filter, TargetFilter::Any) {
+    let (filter, subject_rest) = parse_type_phrase(subject_filter_text);
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
         return None;
     }
-
-    // CR 120.1: Check for "dealt damage this turn by a source you controlled" condition.
-    let replacement_condition = if let Ok((_, _)) =
-        tag::<_, _, OracleError<'_>>("dealt damage this turn by a source you controlled")
-            .parse(subject_rest.trim())
-    {
-        Some(
-            crate::types::ability::ReplacementCondition::DealtDamageThisTurnBySourceControlledBy {
-                controller: crate::types::ability::ControllerRef::You,
-            },
-        )
-    } else {
-        None
-    };
 
     // Extract the replacement effect after "would die, " via a nom combinator.
     // CR 614.1a: Replacement effects use "instead" — both word orders are equivalent:
@@ -2145,6 +2137,60 @@ fn parse_creature_die_exile_replacement(
         def = def.condition(cond);
     }
     Some(def)
+}
+
+fn split_dealt_damage_subject_condition(
+    input: &str,
+) -> Option<(&str, Option<ReplacementCondition>)> {
+    let (condition_text, subject) = take_until::<_, _, OracleError<'_>>(" dealt damage")
+        .parse(input)
+        .ok()?;
+    let condition = parse_dealt_damage_this_turn_source_condition(condition_text.trim())?;
+    Some((subject.trim(), Some(condition)))
+}
+
+fn parse_dealt_damage_this_turn_source_condition(input: &str) -> Option<ReplacementCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("dealt damage ")
+        .parse(input)
+        .ok()?;
+    let (rest, source) = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
+        let (rest, source) = parse_damage_history_source(rest)?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" this turn")
+            .parse(rest)
+            .ok()?;
+        (rest, source)
+    } else {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("this turn by ")
+            .parse(rest)
+            .ok()?;
+        parse_damage_history_source(rest)?
+    };
+
+    rest.trim()
+        .is_empty()
+        .then_some(ReplacementCondition::DealtDamageThisTurnBySource { source })
+}
+
+fn parse_damage_history_source(input: &str) -> Option<(&str, TargetFilter)> {
+    alt((
+        value(
+            TargetFilter::SelfRef,
+            tag::<_, _, OracleError<'_>>("this creature"),
+        ),
+        value(TargetFilter::SelfRef, tag("~")),
+        value(TargetFilter::AttachedTo, tag("enchanted creature")),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            alt((
+                tag::<_, _, OracleError<'_>>("a source you controlled"),
+                tag("source you controlled"),
+                tag("a source you control"),
+                tag("source you control"),
+            )),
+        ),
+    ))
+    .parse(input)
+    .ok()
 }
 
 /// CR 614.1a: Match the exile-anaphor clause in either word order, returning
@@ -5519,6 +5565,46 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn creature_damaged_by_this_source_die_exile_replacement() {
+        let def = parse_replacement_line(
+            "If a creature dealt damage by this creature this turn would die, exile it instead.",
+            "Frostwielder",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.destination_zone, None);
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::DealtDamageThisTurnBySource {
+                source: TargetFilter::SelfRef,
+            })
+        );
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn creature_damaged_by_enchanted_source_die_exile_replacement() {
+        let def = parse_replacement_line(
+            "If a creature dealt damage by enchanted creature this turn would die, exile it instead.",
+            "Kumano's Blessing",
+        )
+        .unwrap();
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::DealtDamageThisTurnBySource {
+                source: TargetFilter::AttachedTo,
+            })
+        );
     }
 
     /// CR 614.1a — prefix-form `instead exile it` mirrors the suffix-form

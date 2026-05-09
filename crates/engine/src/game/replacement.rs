@@ -1723,38 +1723,20 @@ fn evaluate_replacement_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.tapped == *tapped),
-        // CR 120.1: "dealt damage this turn by a source you controlled" — check damage records.
-        ReplacementCondition::DealtDamageThisTurnBySourceControlledBy {
-            controller: ctrl_ref,
-        } => {
-            let required_controller = match ctrl_ref {
-                ControllerRef::You => controller,
-                ControllerRef::Opponent => {
-                    // Find any opponent — simplified for two-player
-                    state
-                        .players
-                        .iter()
-                        .find(|p| p.id != controller && !p.is_eliminated)
-                        .map_or(controller, |p| p.id)
-                }
-                // CR 109.4: Target-player scope has no meaning for a replacement
-                // damage-history condition (no ability-target context here).
-                // Fall back to the replacement controller; parser never emits
-                // this variant in replacement conditions.
-                ControllerRef::ScopedPlayer => controller,
-                ControllerRef::TargetPlayer => controller,
-                ControllerRef::DefendingPlayer => controller,
+        // CR 120.1 + CR 614.1a: Check whether the affected object was dealt
+        // damage this turn by a source matching the replacement's source
+        // filter. The filter is evaluated relative to the replacement source,
+        // so `SelfRef` means "this source" and `AttachedTo` means the object
+        // this Aura/Equipment is attached to.
+        ReplacementCondition::DealtDamageThisTurnBySource { source } => {
+            let Some(affected_id) = affected_object_id else {
+                return false;
             };
-            // Check if the affected object was dealt damage this turn by a source
-            // controlled by the required controller.
-            if let Some(affected_id) = affected_object_id {
-                state.damage_dealt_this_turn.iter().any(|record| {
-                    record.target == TargetRef::Object(affected_id)
-                        && record.source_controller == required_controller
-                })
-            } else {
-                false
-            }
+            let ctx = FilterContext::from_source(state, source_id);
+            state.damage_dealt_this_turn.iter().any(|record| {
+                record.target == TargetRef::Object(affected_id)
+                    && matches_target_filter(state, record.source_id, source, &ctx)
+            })
         }
         ReplacementCondition::EventSourceControlledBy {
             controller: ctrl_ref,
@@ -2805,11 +2787,12 @@ pub fn continue_replacement(
 mod tests {
     use super::*;
     use crate::game::effects::token::apply_create_token_after_replacement;
-    use crate::game::game_object::GameObject;
+    use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
         ReplacementDefinition, TargetFilter, TargetRef,
     };
+    use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{EtbTapState, TokenSpec};
@@ -3760,6 +3743,88 @@ mod tests {
             ObjectId(10),
             &state,
             None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn dealt_damage_by_source_condition_matches_exact_source() {
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let victim = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(20), victim);
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(10),
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(ObjectId(20)),
+            amount: 1,
+            is_combat: false,
+        });
+
+        let cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::SelfRef,
+        };
+
+        assert!(evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            Some(ObjectId(20)),
+            &dummy_begin_turn_event(),
+        ));
+        assert!(!evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            Some(ObjectId(30)),
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn dealt_damage_by_source_condition_matches_attached_to_source() {
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let enchanted = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Enchanted".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(20), enchanted);
+        state.objects.insert(ObjectId(30), victim);
+        state.objects.get_mut(&ObjectId(10)).unwrap().attached_to =
+            Some(AttachTarget::Object(ObjectId(20)));
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(20),
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(ObjectId(30)),
+            amount: 1,
+            is_combat: false,
+        });
+
+        assert!(evaluate_replacement_condition(
+            &ReplacementCondition::DealtDamageThisTurnBySource {
+                source: TargetFilter::AttachedTo,
+            },
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            Some(ObjectId(30)),
             &dummy_begin_turn_event(),
         ));
     }
