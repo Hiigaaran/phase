@@ -2283,6 +2283,7 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
     alt((
         value(CountScope::Controller, tag("you have")),
         value(CountScope::Opponents, tag("each opponent has")),
+        value(CountScope::Opponents, tag("your opponents have")),
         value(CountScope::All, tag("each player has")),
     ))
     .parse(input)
@@ -4110,6 +4111,11 @@ mod tests {
             (
                 "rad counters each opponent has",
                 PlayerCounterKind::Rad,
+                CountScope::Opponents,
+            ),
+            (
+                "poison counter your opponents have",
+                PlayerCounterKind::Poison,
                 CountScope::Opponents,
             ),
         ];
