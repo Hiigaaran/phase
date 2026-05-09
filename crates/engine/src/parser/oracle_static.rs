@@ -6753,6 +6753,10 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 }
 
 fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+    if find_cost_separator(text).is_some() {
+        return None;
+    }
+
     let modifications: Vec<_> = parse_static_line_multi(text)
         .into_iter()
         .map(|definition| {
@@ -8441,8 +8445,8 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, PlayerScope, SharedQuality,
-        SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope,
+        SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
     };
 
     /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
@@ -10343,6 +10347,35 @@ mod tests {
             assert_eq!(definition.kind, AbilityKind::Activated);
             assert!(definition.cost.is_some());
         }
+    }
+
+    #[test]
+    fn quoted_activated_restriction_grants_ability_not_static_mode() {
+        let def =
+            parse_static_line("Enchanted land has \"{T}: Target creature can't block this turn.\"")
+                .unwrap();
+
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBlock
+                }
+            )),
+            "quoted activated ability must not become a static CantBlock grant"
+        );
+        let grant = def
+            .modifications
+            .iter()
+            .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+            .expect("should grant the quoted activated ability");
+        let ContinuousModification::GrantAbility { definition } = grant else {
+            unreachable!();
+        };
+        assert_eq!(definition.kind, AbilityKind::Activated);
+        assert!(definition.cost.is_some());
+        assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(&*definition.effect, Effect::GenericEffect { .. }));
     }
 
     #[test]
