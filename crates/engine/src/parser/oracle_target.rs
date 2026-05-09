@@ -2860,6 +2860,10 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
 
 fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, OracleError<'_>> {
     alt((
+        value(
+            SharedQuality::TotalPowerToughness,
+            tag("total power and toughness"),
+        ),
         value(SharedQuality::Name, tag("names")),
         value(SharedQuality::Name, tag("name")),
         value(SharedQuality::ManaValue, tag("mana values")),

@@ -327,6 +327,10 @@ fn parse_search_selection_quality(
                 alt((tag("toughnesses"), tag("toughness"))),
             ),
             value(
+                SharedQuality::TotalPowerToughness,
+                tag("total power and toughness"),
+            ),
+            value(
                 SharedQuality::CardType,
                 alt((tag("card types"), tag("card type"))),
             ),
@@ -1387,6 +1391,20 @@ fn parse_not_named_suffix(input: &str) -> Result<(&str, FilterProp), nom::Err<Or
     ))
 }
 
+fn parse_same_total_power_toughness_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("with the same total power and toughness").parse(input)?;
+    Ok((
+        rest,
+        FilterProp::SharesQuality {
+            quality: SharedQuality::TotalPowerToughness,
+            reference: Some(Box::new(TargetFilter::TriggeringSource)),
+            relation: SharedQualityRelation::Shares,
+        },
+    ))
+}
+
 fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
     match reference {
         TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
@@ -1666,6 +1684,12 @@ fn parse_search_filter_suffixes(
             };
             suffix.properties.push(prop);
             remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, prop)) = parse_same_total_power_toughness_suffix(remaining) {
+            remaining = rest.trim_start();
+            suffix.properties.push(prop);
             continue;
         }
 
@@ -3184,6 +3208,35 @@ mod tests {
             }
         );
         assert_eq!(details.filter, TargetFilter::Typed(TypedFilter::card()));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn search_same_total_power_toughness_emits_trigger_source_quality_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for a creature card with the same total power and toughness",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(matches!(
+            filter.type_filters.as_slice(),
+            [TypeFilter::Creature]
+        ));
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::TotalPowerToughness,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
+        )));
         assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
             diagnostic,
             OracleDiagnostic::TargetFallback { context, .. }

@@ -156,6 +156,16 @@ fn selection_has_distinct_quality(
                 None => false,
             })
         }
+        SharedQuality::TotalPowerToughness => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                Some(obj) => obj
+                    .power
+                    .zip(obj.toughness)
+                    .is_none_or(|(power, toughness)| seen.insert(power + toughness)),
+                None => false,
+            })
+        }
         SharedQuality::CardType => {
             let mut seen = std::collections::HashSet::new();
             chosen.iter().all(|id| match state.objects.get(id) {

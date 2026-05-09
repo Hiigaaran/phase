@@ -1330,6 +1330,8 @@ pub enum SharedQuality {
     Power,
     /// CR 208.1: toughness.
     Toughness,
+    /// CR 208.1: sum of power and toughness.
+    TotalPowerToughness,
     CreatureType,
     Color,
     CardType,

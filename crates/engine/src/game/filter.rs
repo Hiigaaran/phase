@@ -2456,6 +2456,12 @@ fn shared_quality_values(
         SharedQuality::Toughness => source
             .toughness
             .map_or_else(HashSet::new, |value| HashSet::from([value.to_string()])),
+        SharedQuality::TotalPowerToughness => source
+            .power
+            .zip(source.toughness)
+            .map_or_else(HashSet::new, |(power, toughness)| {
+                HashSet::from([(power + toughness).to_string()])
+            }),
         SharedQuality::CreatureType => {
             if source
                 .keywords
@@ -2790,8 +2796,8 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
         Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
-        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, StaticDefinition,
-        TargetFilter, TriggerDefinition,
+        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -3841,6 +3847,60 @@ mod tests {
 
         assert!(matches_target_filter(&state, blue, &filter, source));
         assert!(!matches_target_filter(&state, red, &filter, source));
+    }
+
+    #[test]
+    fn shares_total_power_toughness_with_parent_target_matches_per_object() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Wild Pair");
+        let entered = add_creature(&mut state, PlayerId(0), "Entered Creature");
+        {
+            let obj = state.objects.get_mut(&entered).unwrap();
+            obj.power = Some(2);
+            obj.toughness = Some(3);
+        }
+        let matching = add_creature(&mut state, PlayerId(0), "Matching Creature");
+        {
+            let obj = state.objects.get_mut(&matching).unwrap();
+            obj.power = Some(4);
+            obj.toughness = Some(1);
+        }
+        let nonmatching = add_creature(&mut state, PlayerId(0), "Nonmatching Creature");
+        {
+            let obj = state.objects.get_mut(&nonmatching).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+            },
+            vec![TargetRef::Object(entered)],
+            source,
+            PlayerId(0),
+        );
+        let ctx = FilterContext::from_ability(&ability);
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::TotalPowerToughness,
+                reference: Some(Box::new(TargetFilter::ParentTarget)),
+                relation: SharedQualityRelation::Shares,
+            },
+        ]));
+
+        assert!(super::matches_target_filter(
+            &state, matching, &filter, &ctx
+        ));
+        assert!(!super::matches_target_filter(
+            &state,
+            nonmatching,
+            &filter,
+            &ctx
+        ));
     }
 
     #[test]
