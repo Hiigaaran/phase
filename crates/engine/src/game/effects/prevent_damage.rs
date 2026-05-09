@@ -6,6 +6,7 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -70,6 +71,44 @@ fn resolve_source_filter(
     }
 }
 
+fn push_player_scoped_shield(
+    state: &mut GameState,
+    source_id: ObjectId,
+    shield: ReplacementDefinition,
+) {
+    let source_is_active_object = state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| matches!(obj.zone, Zone::Battlefield | Zone::Command));
+    if source_is_active_object {
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.replacement_definitions.push(shield);
+        }
+    } else {
+        state.pending_damage_replacements.push(shield);
+    }
+}
+
+fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
+    DamageTargetFilter::Player {
+        player: DamageTargetPlayerScope::Specific(player),
+    }
+}
+
+fn untargeted_damage_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<DamageTargetFilter> {
+    match target {
+        TargetFilter::Any => None,
+        filter if filter.is_context_ref() => Some(player_damage_filter(
+            super::resolve_player_for_context_ref(state, ability, filter),
+        )),
+        _ => None,
+    }
+}
+
 /// CR 615: Prevent damage — creates a prevention shield on the source object.
 ///
 /// The shield is stored as a `ReplacementDefinition` with `ShieldKind::Prevention`
@@ -83,13 +122,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, scope, effect_source_filter) = match &ability.effect {
+    let (amount, target, scope, effect_source_filter) = match &ability.effect {
         Effect::PreventDamage {
             amount,
+            target,
             scope,
             damage_source_filter,
             ..
-        } => (*amount, *scope, damage_source_filter.clone()),
+        } => (
+            *amount,
+            target.clone(),
+            *scope,
+            damage_source_filter.clone(),
+        ),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected PreventDamage effect".to_string(),
@@ -117,6 +162,10 @@ pub fn resolve(
         shield = shield.combat_scope(CombatDamageScope::CombatOnly);
     }
 
+    if let Some(filter) = untargeted_damage_filter(state, ability, &target) {
+        shield = shield.damage_target_filter(filter);
+    }
+
     if let Some(sub_ability) = &ability.sub_ability {
         shield = shield.runtime_execute(sub_ability.as_ref().clone());
     }
@@ -127,28 +176,23 @@ pub fn resolve(
     // scans Battlefield/Command zones (instants move to graveyard after resolving).
     //
     // For untargeted effects (Fog: "prevent all combat damage"), the shield lives on
-    // the source permanent. If the source is an instant/sorcery, the shield won't persist
-    // after resolution — untargeted instant prevention requires a global mechanism (future work).
-    if !ability.targets.is_empty() {
-        for target in &ability.targets {
-            match target {
+    // the source permanent when possible; instant/sorcery shields that need to outlive
+    // stack resolution use the game-level pending registry instead.
+    if !ability.targets.is_empty() && !target.is_context_ref() {
+        for selected_target in &ability.targets {
+            match selected_target {
                 TargetRef::Object(obj_id) => {
                     if let Some(obj) = state.objects.get_mut(obj_id) {
                         obj.replacement_definitions.push(shield.clone());
                     }
                 }
-                TargetRef::Player(_) => {
-                    // Player-targeted prevention: attach to source (permanent abilities)
-                    // and scope with damage_target_filter.
-                    let player_shield =
-                        shield
-                            .clone()
-                            .damage_target_filter(DamageTargetFilter::Player {
-                                player: DamageTargetPlayerScope::Any,
-                            });
-                    if let Some(obj) = state.objects.get_mut(&ability.source_id) {
-                        obj.replacement_definitions.push(player_shield);
-                    }
+                TargetRef::Player(player) => {
+                    // Player-targeted prevention scopes to the chosen player and
+                    // persists globally when created by an instant/sorcery on the stack.
+                    let player_shield = shield
+                        .clone()
+                        .damage_target_filter(player_damage_filter(*player));
+                    push_player_scoped_shield(state, ability.source_id, player_shield);
                 }
             }
         }
@@ -427,6 +471,78 @@ mod tests {
             .filter(|obj| obj.zone == Zone::Battlefield && obj.name == "Inkling")
             .count();
         assert_eq!(inklings, 3);
+    }
+
+    #[test]
+    fn controller_scoped_instant_prevention_only_prevents_damage_to_controller() {
+        let mut state = GameState::new_two_player(42);
+        let shield_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Inkshield".to_string(),
+            Zone::Stack,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                target: TargetFilter::Controller,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: None,
+            },
+            vec![],
+            shield_source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].damage_target_filter,
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Specific(PlayerId(0)),
+            })
+        );
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+        let opponent_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Player(PlayerId(1)),
+            2,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            opponent_result,
+            deal_damage::DamageResult::Applied(2)
+        ));
+        assert_eq!(state.players[1].life, 18);
+
+        let controller_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Player(PlayerId(0)),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            controller_result,
+            deal_damage::DamageResult::Applied(0)
+        ));
+        assert_eq!(state.players[0].life, 20);
     }
 
     #[test]
