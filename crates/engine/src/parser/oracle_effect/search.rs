@@ -9,6 +9,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
+use super::super::oracle_quantity;
 use super::super::oracle_target::{
     parse_mana_value_suffix, parse_shared_quality_clause, parse_target, parse_type_phrase,
 };
@@ -594,15 +595,20 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
     };
 
     let (filter_text, from_top) = parse_seek_from_top_limit(filter_text);
+    let (filter_text, dynamic_count) = split_seek_for_each_count_suffix(filter_text)
+        .map_or((filter_text, None), |(remaining, count)| {
+            (remaining, Some(count))
+        });
 
     // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
-    let (count, remaining) =
-        if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
-            (expr, rest.trim_start())
-        } else {
-            (QuantityExpr::Fixed { value: 1 }, filter_text)
-        };
+    let (count, remaining) = if let Some(expr) = dynamic_count {
+        (expr, filter_text)
+    } else if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
+        (expr, rest.trim_start())
+    } else {
+        (QuantityExpr::Fixed { value: 1 }, filter_text)
+    };
 
     // Strip leading article "a "/"an "
     let remaining = nom_primitives::parse_article
@@ -620,6 +626,17 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         enter_tapped,
         extra_filters,
     }
+}
+
+fn split_seek_for_each_count_suffix(filter_text: &str) -> Option<(&str, QuantityExpr)> {
+    let (suffix, remaining) = take_until::<_, _, OracleError<'_>>(" for each ")
+        .parse(filter_text)
+        .ok()?;
+    let (clause, _) = tag::<_, _, OracleError<'_>>(" for each ")
+        .parse(suffix)
+        .ok()?;
+    let count = oracle_quantity::parse_for_each_clause_expr(clause.trim())?;
+    Some((remaining.trim_end(), count))
 }
 
 fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {

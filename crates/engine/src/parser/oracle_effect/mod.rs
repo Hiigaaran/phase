@@ -19337,6 +19337,27 @@ mod tests {
     }
 
     #[test]
+    fn seek_for_each_card_exiled_from_your_hand_uses_dynamic_count() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek an instant or sorcery card for each card exiled from your hand this way",
+            &mut ctx,
+        );
+        assert!(matches!(
+            details.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ExiledFromHandThisResolution
+            }
+        ));
+        assert!(matches!(details.filter, TargetFilter::Or { .. }));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
     fn seek_land_and_nonland_cards_splits_filters() {
         let details = parse_seek_details(
             "seek a land card and a nonland card",
