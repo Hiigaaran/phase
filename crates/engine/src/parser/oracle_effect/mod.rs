@@ -42,14 +42,14 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission,
+    ChoiceType, ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
     ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
     FilterProp, GainLifePlayer, GameRestriction, ManaProduction, MultiTargetSpec, ObjectScope,
     PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
     StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -474,6 +474,7 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -597,6 +598,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -931,6 +933,7 @@ fn try_parse_inline_delayed_trigger(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1162,6 +1165,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1225,6 +1229,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1273,6 +1278,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1396,6 +1402,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         multi_target,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1470,6 +1477,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1831,6 +1839,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -2772,6 +2781,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
         duration: Some(Duration::UntilEndOfTurn),
         sub_ability: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -2817,6 +2827,7 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -3558,6 +3569,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             multi_target: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -3597,6 +3609,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 multi_target: None,
                 condition: None,
                 optional: false,
+                unless_pay: None,
             });
         }
     }
@@ -3766,6 +3779,7 @@ fn parsed_for_each_quantity_effect(
                 multi_target: None,
                 condition: None,
                 optional: false,
+                unless_pay: None,
             };
         }
     }
@@ -3778,6 +3792,7 @@ fn parsed_for_each_quantity_effect(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     }
 }
 
@@ -3874,6 +3889,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -4618,12 +4634,12 @@ fn try_parse_verb_and_target<'a>(
         } else {
             parsed_target
         };
-        let unless_payment = parse_unless_payment(rest_lower);
+        let unless_pay = parse_unless_payment(rest_lower).map(counter_unless_pay_modifier);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
                 target,
                 source_static: None,
-                unless_payment,
+                unless_pay,
                 all: true,
             })),
             rem,
@@ -4645,12 +4661,12 @@ fn try_parse_verb_and_target<'a>(
             parsed_target
         };
         // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
-        let unless_payment = parse_unless_payment(rest_lower);
+        let unless_pay = parse_unless_payment(rest_lower).map(counter_unless_pay_modifier);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
                 target,
                 source_static: None,
-                unless_payment,
+                unless_pay,
                 all: false,
             })),
             rem,
@@ -4905,6 +4921,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -4941,6 +4958,7 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -5077,6 +5095,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -5205,6 +5224,7 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -5273,6 +5293,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -5419,6 +5440,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -5593,6 +5615,7 @@ fn lower_subject_predicate_ast(
             multi_target,
             condition: None,
             optional: subject.is_optional,
+            unless_pay: None,
         },
         PredicateAst::Become {
             effect,
@@ -5606,6 +5629,7 @@ fn lower_subject_predicate_ast(
             multi_target,
             condition: None,
             optional: subject.is_optional,
+            unless_pay: None,
         },
         PredicateAst::Restriction { effect, duration } => ParsedEffectClause {
             effect,
@@ -5615,6 +5639,7 @@ fn lower_subject_predicate_ast(
             multi_target,
             condition: None,
             optional: subject.is_optional,
+            unless_pay: None,
         },
         PredicateAst::ImperativeFallback { text } => {
             let pred_lower = text.to_lowercase();
@@ -5722,6 +5747,7 @@ fn lower_subject_predicate_ast(
                         multi_target: subject.multi_target,
                         condition: None,
                         optional: subject.is_optional,
+                        unless_pay: None,
                     };
                 }
             }
@@ -5748,6 +5774,7 @@ fn lower_subject_predicate_ast(
                         multi_target: subject.multi_target,
                         condition: None,
                         optional: subject.is_optional,
+                        unless_pay: None,
                     };
                 }
 
@@ -5762,6 +5789,7 @@ fn lower_subject_predicate_ast(
                         multi_target: subject.multi_target,
                         condition: None,
                         optional: subject.is_optional,
+                        unless_pay: None,
                     };
                 }
             }
@@ -6113,6 +6141,7 @@ fn wrap_target_subject_damage(
         multi_target: subject.multi_target.clone(),
         condition: None,
         optional: subject.is_optional,
+        unless_pay: None,
     })
 }
 
@@ -8246,7 +8275,7 @@ pub(crate) fn parse_effect_chain_ir(
         let mut player_scope = player_scope
             .or(implicit_player_scope)
             .or(carried_player_scope);
-        let (text, unless_pay) = extract_resolution_unless_pay_modifier(&text);
+        let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -8410,6 +8439,7 @@ pub(crate) fn parse_effect_chain_ir(
                     multi_target: animate_def.multi_target.clone(),
                     condition: animate_def.condition.clone(),
                     optional: animate_def.optional,
+                    unless_pay: animate_def.unless_pay.clone(),
                 },
                 boundary: chunk.boundary_after,
                 condition: condition.clone(),
@@ -8444,6 +8474,18 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (parse_effect_clause(&text_no_qty, ctx), repeat_for)
         };
+
+        // CR 118.12: After parsing the effect clause, the lowering for
+        // `Effect::Counter` carries its own `unless_pay` modifier on the
+        // produced `ParsedEffectClause` (post-2026-05-09 fold). Merge it into
+        // the chunk-level `unless_pay` so it propagates into the ClauseIr.
+        // The resolution-time extractor (`extract_resolution_unless_pay_modifier`)
+        // catches "[verb] [target] unless [player] pays [cost]" patterns at
+        // the chunk-text level; the AST intercept catches Counter-specific
+        // shapes that survive into the lowered effect.
+        if unless_pay.is_none() {
+            unless_pay = clause.unless_pay.clone();
+        }
 
         // CR 608.2c: Verb carry-forward for bare "target X" clauses in multi-target
         // conjunctions. When a clause parses as Unimplemented and starts with "target",
@@ -10970,6 +11012,7 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
         multi_target,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -11046,6 +11089,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         multi_target,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -12055,10 +12099,23 @@ fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     (false, false)
 }
 
+/// CR 118.12: Wrap a parsed counter unless-cost into the unified
+/// `UnlessPayModifier`. The payer is `TargetFilter::ParentTargetController`,
+/// which at runtime resolves to "controller of the spell/ability targeted by
+/// this counter effect" — matching the bespoke stack-search the pre-fold
+/// `effects/counter.rs` did.
+pub(super) fn counter_unless_pay_modifier(cost: AbilityCost) -> UnlessPayModifier {
+    UnlessPayModifier {
+        cost,
+        payer: TargetFilter::ParentTargetController,
+    }
+}
+
 /// CR 118.12: Parse "unless its controller pays {X}" from counter/trigger text.
-/// Returns `UnlessCost::Fixed` for static costs ({3}, {1}{U}) and
-/// `UnlessCost::DynamicGeneric` for "pays {X}, where X is this creature's power" etc.
-fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
+/// Returns `AbilityCost::Mana` for static costs ({3}, {1}{U}),
+/// `AbilityCost::ManaDynamic` for "pays {X}, where X is this creature's power",
+/// and `AbilityCost::PayEnergy` for "{E}{E}" patterns.
+pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     // Find "unless" followed by a subject and "pays {cost}"
     let after_unless = strip_after(lower, "unless ")?;
     // Skip the subject ("its controller", "that player", "he or she", etc.)
@@ -12073,14 +12130,14 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
     }
     if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_text) {
         if rest.trim().is_empty() {
-            return Some(UnlessCost::PayEnergy { amount });
+            return Some(AbilityCost::PayEnergy { amount });
         }
     }
     // Check for dynamic {X} with "where X is" clause
     if cost_text == "{X}" || cost_text == "{x}" {
         let after_cost = &cost_str[cost_end..];
         if let Some(quantity) = parse_where_x_is(after_cost) {
-            return Some(UnlessCost::DynamicGeneric { quantity });
+            return Some(AbilityCost::ManaDynamic { quantity });
         }
         // {X} without "where X is" — unresolvable, skip
         return None;
@@ -12092,7 +12149,7 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
     if cost == ManaCost::NoCost || cost == ManaCost::zero() {
         return None;
     }
-    Some(UnlessCost::Fixed { cost })
+    Some(AbilityCost::Mana { cost })
 }
 
 fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
@@ -12140,10 +12197,10 @@ fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> 
     .parse(input)
 }
 
-fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
+fn parse_resolution_unless_cost(cost_text: &str) -> Option<AbilityCost> {
     if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_text.trim_start()) {
         if rest.trim().is_empty() {
-            return Some(UnlessCost::PayEnergy { amount });
+            return Some(AbilityCost::PayEnergy { amount });
         }
     }
 
@@ -12152,7 +12209,7 @@ fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
             return Some(unless_cost);
         }
         if cost != ManaCost::NoCost && cost != ManaCost::zero() {
-            return Some(UnlessCost::Fixed { cost });
+            return Some(AbilityCost::Mana { cost });
         }
     }
 
@@ -12161,8 +12218,10 @@ fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
         .parse(after_amount.trim_start())
         .is_ok()
     {
-        return Some(UnlessCost::PayLife {
-            amount: amount as i32,
+        return Some(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed {
+                value: amount as i32,
+            },
         });
     }
 
@@ -12179,7 +12238,7 @@ pub(crate) fn parse_fixed_energy_unless_cost(input: &str) -> Option<(u32, &str)>
 pub(crate) fn parse_unless_for_each_payment(
     after_cost: &str,
     cost: &ManaCost,
-) -> Option<UnlessCost> {
+) -> Option<AbilityCost> {
     let ManaCost::Cost { shards, generic } = cost else {
         return None;
     };
@@ -12202,7 +12261,7 @@ pub(crate) fn parse_unless_for_each_payment(
             inner: Box::new(QuantityExpr::Ref { qty }),
         }
     };
-    Some(UnlessCost::DynamicGeneric { quantity })
+    Some(AbilityCost::ManaDynamic { quantity })
 }
 
 /// Parse "where X is this creature's power" and similar dynamic quantity clauses.
@@ -13682,31 +13741,32 @@ mod tests {
     #[test]
     fn effect_counter_unless_pays_parses_mana_cost() {
         use crate::types::mana::ManaCost;
-        let e = parse_effect("Counter target spell unless its controller pays {3}");
-        if let Effect::Counter {
-            unless_payment,
-            target,
-            ..
-        } = &e
-        {
-            assert_eq!(
-                *unless_payment,
-                Some(UnlessCost::Fixed {
-                    cost: ManaCost::Cost {
-                        shards: vec![],
-                        generic: 3
-                    }
-                }),
-                "should parse {{3}} unless payment"
-            );
+        // Post-fold: the unless modifier travels on AbilityDefinition.unless_pay,
+        // not on Effect::Counter.unless_payment (which no longer exists).
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {3}",
+            AbilityKind::Spell,
+        );
+        if let Effect::Counter { target, .. } = def.effect.as_ref() {
             assert!(
                 matches!(target, TargetFilter::Typed(TypedFilter { properties, .. })
                     if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))),
                 "target should be on stack"
             );
         } else {
-            panic!("expected Counter effect, got {e:?}");
+            panic!("expected Counter effect, got {:?}", def.effect);
         }
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 3
+                }
+            },
+        );
     }
 
     #[test]
@@ -13723,7 +13783,7 @@ mod tests {
         assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
         assert_eq!(
             unless_pay.cost,
-            UnlessCost::Fixed {
+            AbilityCost::Mana {
                 cost: ManaCost::Cost {
                     shards: vec![],
                     generic: 1,
@@ -13742,84 +13802,87 @@ mod tests {
         assert!(matches!(*def.effect, Effect::Tap { .. }));
         let unless_pay = def.unless_pay.expect("should attach unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
-        assert_eq!(unless_pay.cost, UnlessCost::PayLife { amount: 2 });
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        );
     }
 
     #[test]
     fn effect_counter_unless_pays_for_each_uses_dynamic_cost() {
-        let e = parse_effect(
+        let def = parse_effect_chain(
             "Counter target spell unless its controller pays {1} for each card in your graveyard",
+            AbilityKind::Spell,
         );
-        if let Effect::Counter { unless_payment, .. } = &e {
-            assert!(
-                matches!(
-                    unless_payment,
-                    Some(UnlessCost::DynamicGeneric {
-                        quantity: QuantityExpr::Ref {
-                            qty: QuantityRef::ZoneCardCount {
-                                zone: ZoneRef::Graveyard,
-                                ..
-                            }
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::ManaDynamic {
+                    quantity: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            ..
                         }
-                    })
-                ),
-                "unless payment should be dynamic graveyard count, got {unless_payment:?}"
-            );
-        } else {
-            panic!("expected Counter effect, got {e:?}");
-        }
+                    }
+                }
+            ),
+            "unless payment should be dynamic graveyard count, got {:?}",
+            unless_pay.cost
+        );
     }
 
     #[test]
     fn effect_counter_unless_pays_for_each_multiplies_generic_cost() {
-        let e = parse_effect(
+        let def = parse_effect_chain(
             "Counter target spell unless its controller pays {3} for each card discarded this way",
+            AbilityKind::Spell,
         );
-        if let Effect::Counter { unless_payment, .. } = &e {
-            assert!(
-                matches!(
-                    unless_payment,
-                    Some(UnlessCost::DynamicGeneric {
-                        quantity: QuantityExpr::Multiply {
-                            factor: 3,
-                            inner,
-                        }
-                    }) if matches!(
-                        inner.as_ref(),
-                        QuantityExpr::Ref {
-                            qty: QuantityRef::TrackedSetSize
-                        }
-                    )
-                ),
-                "unless payment should multiply tracked-set count, got {unless_payment:?}"
-            );
-        } else {
-            panic!("expected Counter effect, got {e:?}");
-        }
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::ManaDynamic {
+                    quantity: QuantityExpr::Multiply {
+                        factor: 3,
+                        inner,
+                    }
+                } if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    }
+                )
+            ),
+            "unless payment should multiply tracked-set count, got {:?}",
+            unless_pay.cost
+        );
     }
 
     #[test]
     fn effect_counter_unless_pays_x_where_x_is_devotion() {
-        let e = parse_effect(
+        let def = parse_effect_chain(
             "Counter target spell unless its controller pays {X}, where X is your devotion to blue",
+            AbilityKind::Spell,
         );
-        if let Effect::Counter { unless_payment, .. } = &e {
-            assert_eq!(
-                *unless_payment,
-                Some(UnlessCost::DynamicGeneric {
-                    quantity: QuantityExpr::Ref {
-                        qty: QuantityRef::Devotion {
-                            colors: crate::types::ability::DevotionColors::Fixed(vec![
-                                ManaColor::Blue,
-                            ]),
-                        },
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: crate::types::ability::DevotionColors::Fixed(
+                            vec![ManaColor::Blue,]
+                        ),
                     },
-                }),
-                "unless payment should use devotion quantity, got {unless_payment:?}"
-            );
-        } else {
-            panic!("expected Counter effect, got {e:?}");
-        }
+                },
+            }
+        );
     }
 
     #[test]
@@ -13865,15 +13928,14 @@ mod tests {
 
     #[test]
     fn effect_counter_without_unless_has_none_payment() {
-        let e = parse_effect("Counter target spell");
-        if let Effect::Counter { unless_payment, .. } = &e {
-            assert_eq!(
-                *unless_payment, None,
-                "plain counter should have no unless_payment"
-            );
-        } else {
-            panic!("expected Counter effect");
-        }
+        // Post-fold: a plain counter has no unless_pay modifier on the
+        // wrapping AbilityDefinition.
+        let def = parse_effect_chain("Counter target spell", AbilityKind::Spell);
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        assert!(
+            def.unless_pay.is_none(),
+            "plain counter should have no unless_pay modifier"
+        );
     }
 
     #[test]
@@ -21349,24 +21411,22 @@ mod tests {
         );
 
         match &*def.effect {
-            Effect::Counter {
-                target,
-                unless_payment,
-                ..
-            } => {
+            Effect::Counter { target, .. } => {
                 assert!(matches!(
                     target,
                     TargetFilter::Typed(tf)
                         if tf.type_filters.contains(&TypeFilter::Card)
                             && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
                 ));
-                assert!(
-                    unless_payment.is_some(),
-                    "counter rider should preserve unless-payment"
-                );
             }
             other => panic!("expected Counter effect, got {other:?}"),
         }
+        // Post-fold: the unless-pay modifier lives on the wrapping
+        // AbilityDefinition, not on Effect::Counter.
+        assert!(
+            def.unless_pay.is_some(),
+            "counter rider should preserve unless-payment"
+        );
 
         let exile = def
             .sub_ability

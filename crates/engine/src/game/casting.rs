@@ -4428,6 +4428,15 @@ pub fn pay_ability_cost(
                 None,
             );
         }
+        // CR 118.4 + CR 107.3c: Dynamic-generic mana primarily appears in
+        // unless-pay contexts (post-2026-05-09 fold). It should not reach an
+        // activation-time payment path, where the X is normally announced
+        // and resolved upstream.
+        AbilityCost::ManaDynamic { .. } => {
+            return Err(EngineError::ActionNotAllowed(
+                "ManaDynamic cost should be resolved upstream".into(),
+            ));
+        }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
         AbilityCost::Untap
@@ -4575,7 +4584,18 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
 
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
-        AbilityCost::ReturnToHand { count, filter } => Some((*count, filter.as_ref())),
+        // CR 118.12: This helper currently only handles the default
+        // battlefield-source shape (`from_zone: None`). Cards with
+        // `from_zone: Some(_)` use the unless-cost path in
+        // `engine_payment_choices.rs`, not the activation-cost path here.
+        AbilityCost::ReturnToHand {
+            count,
+            filter,
+            from_zone: None,
+        } => Some((*count, filter.as_ref())),
+        AbilityCost::ReturnToHand {
+            from_zone: Some(_), ..
+        } => None,
         AbilityCost::Composite { costs } => costs.iter().find_map(find_return_to_hand_cost),
         _ => None,
     }
@@ -8530,6 +8550,7 @@ mod tests {
                         TypedFilter::new(TypeFilter::Subtype("Forest".to_string()))
                             .controller(ControllerRef::You),
                     )),
+                    from_zone: None,
                 })
                 .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
             );
@@ -11652,7 +11673,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::card()),
                     source_static: None,
-                    unless_payment: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {

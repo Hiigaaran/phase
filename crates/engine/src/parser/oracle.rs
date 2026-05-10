@@ -5051,6 +5051,7 @@ mod tests {
             Some(AbilityCost::ReturnToHand {
                 count,
                 filter: Some(TargetFilter::Typed(filter)),
+                from_zone: None,
             }) => {
                 assert_eq!(*count, 1);
                 assert_eq!(filter.get_subtype(), Some("Forest"));

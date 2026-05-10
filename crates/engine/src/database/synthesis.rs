@@ -10,7 +10,7 @@ use crate::types::ability::{
     ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, PtValue, QuantityExpr,
     ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
     StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessCost, UnlessPayModifier,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1229,7 +1229,7 @@ pub fn synthesize_echo(face: &mut CardFace) {
                     .to_string(),
             );
         trigger.unless_pay = Some(UnlessPayModifier {
-            cost: UnlessCost::Fixed { cost },
+            cost: AbilityCost::Mana { cost },
             payer: TargetFilter::Controller,
         });
         face.triggers.push(trigger);
@@ -2634,7 +2634,7 @@ mod echo_synthesis_tests {
         assert!(matches!(
             trigger.unless_pay.as_ref(),
             Some(UnlessPayModifier {
-                cost: UnlessCost::Fixed {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost { generic: 3, .. },
                 },
                 payer: TargetFilter::Controller,

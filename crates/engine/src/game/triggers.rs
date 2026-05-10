@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef, DelayedTriggerCondition,
-    Effect, ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-    TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef,
+    DelayedTriggerCondition, Effect, ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -65,30 +66,40 @@ pub struct PendingTrigger {
     pub may_trigger_origin: Option<MayTriggerOrigin>,
 }
 
-/// CR 702.21a: Convert a WardCost to an UnlessCost for the counter effect.
-fn ward_cost_to_unless_cost(ward_cost: &WardCost) -> UnlessCost {
+/// CR 702.21a + CR 118.12: Convert a WardCost to an `AbilityCost` for the
+/// counter effect's `unless_pay` modifier. Post-fold, ward and counter share
+/// the unified `AbilityCost` taxonomy.
+fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
     match ward_cost {
-        WardCost::Mana(mana_cost) => UnlessCost::Fixed {
+        WardCost::Mana(mana_cost) => AbilityCost::Mana {
             cost: mana_cost.clone(),
         },
-        WardCost::PayLife(amount) => UnlessCost::PayLife { amount: *amount },
-        WardCost::DiscardCard => UnlessCost::DiscardCard { filter: None },
-        WardCost::Sacrifice { count, filter } => UnlessCost::Sacrifice {
+        WardCost::PayLife(amount) => AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: *amount },
+        },
+        WardCost::DiscardCard => AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            random: false,
+            self_ref: false,
+        },
+        WardCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
+            target: filter.clone(),
             count: *count,
-            filter: filter.clone(),
         },
         // CR 702.21a + CR 701.67: Waterbend ward cost maps to mana payment.
         // Full tap-to-help semantics deferred to waterbend cost integration.
-        WardCost::Waterbend(mana_cost) => UnlessCost::Fixed {
+        WardCost::Waterbend(mana_cost) => AbilityCost::Mana {
             cost: mana_cost.clone(),
         },
-        // CR 702.21a: Compound ward cost — use the first mana component as the unless cost.
-        // Full compound cost resolution deferred to ward cost payment integration.
+        // CR 702.21a: Compound ward cost — use the first mana component as
+        // the unless cost. Full compound cost resolution deferred to ward
+        // cost payment integration.
         WardCost::Compound(costs) => {
             if let Some(first) = costs.first() {
-                ward_cost_to_unless_cost(first)
+                ward_cost_to_ability_cost(first)
             } else {
-                UnlessCost::Fixed {
+                AbilityCost::Mana {
                     cost: crate::types::mana::ManaCost::zero(),
                 }
             }
@@ -754,18 +765,26 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         if let Some(src_ctrl) = source_controller {
                             if src_ctrl != controller {
                                 for ward in &ward_costs {
-                                    let unless_cost = ward_cost_to_unless_cost(ward);
+                                    // CR 702.21a + CR 118.12: Ward generates a counter
+                                    // effect with an unless-pay modifier. Post-fold, the
+                                    // modifier lives on `ResolvedAbility.unless_pay` and
+                                    // is intercepted by the unified runtime pipeline.
+                                    let unless_cost = ward_cost_to_ability_cost(ward);
                                     let counter_effect = Effect::Counter {
                                         target: TargetFilter::TriggeringSource,
                                         source_static: None,
-                                        unless_payment: Some(unless_cost),
                                     };
-                                    let ward_ability = ResolvedAbility::new(
+                                    let mut ward_ability = ResolvedAbility::new(
                                         counter_effect,
                                         Vec::new(),
                                         obj_id,
                                         controller,
                                     );
+                                    ward_ability.unless_pay =
+                                        Some(crate::types::ability::UnlessPayModifier {
+                                            cost: unless_cost,
+                                            payer: TargetFilter::TriggeringSpellController,
+                                        });
                                     pending.push(PendingTriggerContext::single(PendingTrigger {
                                         source_id: obj_id,
                                         controller,
@@ -5110,13 +5129,13 @@ pub mod tests {
         assert_eq!(ward_entry.source_id, creature);
         match &ward_entry.kind {
             crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => {
-                assert!(matches!(
-                    ability.effect,
-                    Effect::Counter {
-                        ref unless_payment,
-                        ..
-                    } if unless_payment.is_some()
-                ));
+                // Post-fold: the unless-pay modifier lives on
+                // `ResolvedAbility.unless_pay`, not on `Effect::Counter`.
+                assert!(matches!(ability.effect, Effect::Counter { .. }));
+                assert!(
+                    ability.unless_pay.is_some(),
+                    "ward should attach an unless_pay modifier"
+                );
             }
             _ => panic!("Expected TriggeredAbility on stack"),
         }
@@ -5284,37 +5303,50 @@ pub mod tests {
     }
 
     #[test]
-    fn ward_cost_to_unless_cost_all_variants() {
+    fn ward_cost_to_ability_cost_all_variants() {
         use crate::types::keywords::WardCost;
         use crate::types::mana::ManaCost;
 
         // Mana cost
         let mana = WardCost::Mana(ManaCost::generic(3));
-        let result = ward_cost_to_unless_cost(&mana);
-        assert!(matches!(result, UnlessCost::Fixed { cost } if cost == ManaCost::generic(3)));
+        let result = ward_cost_to_ability_cost(&mana);
+        assert!(matches!(result, AbilityCost::Mana { cost } if cost == ManaCost::generic(3)));
 
         // Pay life
         let life = WardCost::PayLife(2);
-        let result = ward_cost_to_unless_cost(&life);
-        assert!(matches!(result, UnlessCost::PayLife { amount: 2 }));
+        let result = ward_cost_to_ability_cost(&life);
+        assert!(matches!(
+            result,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
 
         // Discard
         let discard = WardCost::DiscardCard;
-        let result = ward_cost_to_unless_cost(&discard);
-        assert!(matches!(result, UnlessCost::DiscardCard { filter: None }));
+        let result = ward_cost_to_ability_cost(&discard);
+        assert!(matches!(
+            result,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                random: false,
+                self_ref: false,
+            }
+        ));
 
         // Sacrifice
         let sacrifice = WardCost::Sacrifice {
             count: 1,
             filter: TargetFilter::Any,
         };
-        let result = ward_cost_to_unless_cost(&sacrifice);
-        assert!(matches!(result, UnlessCost::Sacrifice { count: 1, .. }));
+        let result = ward_cost_to_ability_cost(&sacrifice);
+        assert!(matches!(result, AbilityCost::Sacrifice { count: 1, .. }));
 
         // Waterbend
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));
-        let result = ward_cost_to_unless_cost(&waterbend);
-        assert!(matches!(result, UnlessCost::Fixed { cost } if cost == ManaCost::generic(4)));
+        let result = ward_cost_to_ability_cost(&waterbend);
+        assert!(matches!(result, AbilityCost::Mana { cost } if cost == ManaCost::generic(4)));
     }
 
     #[test]

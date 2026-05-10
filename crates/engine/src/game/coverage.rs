@@ -5484,15 +5484,11 @@ impl<'a> ParsedElement<'a> {
         }
     }
 
-    /// Check if this element has an "unless" payment (Counter with unless_payment, or
-    /// trigger-level unless_pay).
+    /// Check if this element has an "unless" payment. Post-2026-05-09 fold,
+    /// the unless modifier lives uniformly on `AbilityDefinition.unless_pay`
+    /// (regardless of whether it's a counter, tax, or ward).
     fn has_unless(&self) -> bool {
-        let unless_pred = |d: &AbilityDefinition| -> bool {
-            matches!(
-                &*d.effect,
-                Effect::Counter { unless_payment, .. } if unless_payment.is_some()
-            )
-        };
+        let unless_pred = |d: &AbilityDefinition| -> bool { d.unless_pay.is_some() };
         match self {
             ParsedElement::Ability(a) => ability_tree_any(a, &unless_pred),
             ParsedElement::Trigger(t) => {

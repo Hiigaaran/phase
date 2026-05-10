@@ -2530,9 +2530,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, CounterTransferMode, Duration, Effect, FilterProp, ModalChoice,
+        AbilityCost, AbilityKind, CounterTransferMode, Duration, Effect, FilterProp, ModalChoice,
         ModalSelectionConstraint, MultiTargetSpec, PtValue, QuantityExpr, QuantityRef,
-        SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessCost,
+        SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter, TypedFilter,
         UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
@@ -2609,7 +2609,9 @@ mod tests {
     #[test]
     fn build_resolved_from_def_preserves_unless_pay_modifier() {
         let modifier = UnlessPayModifier {
-            cost: UnlessCost::PayLife { amount: 2 },
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             payer: TargetFilter::ParentTargetController,
         };
         let def = AbilityDefinition::new(

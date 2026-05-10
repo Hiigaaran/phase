@@ -1917,7 +1917,7 @@ fn resume_waiting_for(player: PlayerId, resume: ManaAbilityResume) -> WaitingFor
             effect_description,
         } => WaitingFor::UnlessPayment {
             player,
-            cost,
+            cost: *cost,
             pending_effect,
             trigger_event,
             effect_description,

@@ -1517,7 +1517,11 @@ fn pay_additional_cost(
                 });
             }
         }
-        AbilityCost::ReturnToHand { count, ref filter } => {
+        AbilityCost::ReturnToHand {
+            count,
+            ref filter,
+            from_zone: _,
+        } => {
             let eligible = super::casting::find_eligible_return_to_hand_targets(
                 state,
                 player,
@@ -5377,7 +5381,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5493,7 +5496,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5578,7 +5580,6 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5652,7 +5653,6 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5759,7 +5759,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,

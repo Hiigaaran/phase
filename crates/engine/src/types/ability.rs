@@ -3280,6 +3280,15 @@ pub enum AbilityCost {
     Mana {
         cost: ManaCost,
     },
+    /// CR 118.4 + CR 107.3c: A mana cost whose generic component is determined
+    /// dynamically at the moment the cost is paid (e.g., "{X}, where X is this
+    /// creature's power"). The runtime resolves this into a fixed `ManaCost`
+    /// before the player is prompted to pay; this variant carries the dynamic
+    /// expression up to that resolution point. Distinct from `Mana { cost }`,
+    /// which is fully static.
+    ManaDynamic {
+        quantity: QuantityExpr,
+    },
     Tap,
     Untap,
     Loyalty {
@@ -3340,10 +3349,17 @@ pub enum AbilityCost {
     PaySpeed {
         amount: QuantityExpr,
     },
+    /// CR 118.12: Return N permanents matching `filter` to their owner's hand
+    /// as a cost. `from_zone` defaults to `None`, meaning battlefield (the
+    /// standard "return to hand" cost shape, e.g., "return a land you control
+    /// to its owner's hand"). Some unless-cost cards (Harvest Wurm) use
+    /// `Some(Zone::Graveyard)` to return cards from the graveyard instead.
     ReturnToHand {
         count: u32,
         #[serde(default)]
         filter: Option<TargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_zone: Option<Zone>,
     },
     Mill {
         count: u32,
@@ -3423,6 +3439,7 @@ impl AbilityCost {
     pub fn categories(&self) -> Vec<CostCategory> {
         match self {
             AbilityCost::Mana { .. } => vec![CostCategory::ManaOnly],
+            AbilityCost::ManaDynamic { .. } => vec![CostCategory::ManaOnly],
             AbilityCost::Tap => vec![CostCategory::TapsSelf],
             AbilityCost::Untap => vec![CostCategory::UntapsSelf],
             AbilityCost::Loyalty { .. } => vec![CostCategory::PaysLoyalty],
@@ -3553,52 +3570,133 @@ pub enum SpellCastingOptionKind {
 }
 
 // ---------------------------------------------------------------------------
-// Unless Cost -- dynamic or static mana costs for "unless pays" effects
+// UnlessPayModifier -- the "unless [player] pays [cost]" wrapper
 // ---------------------------------------------------------------------------
 
-/// CR 118.12: Cost that may be static or resolved dynamically at payment time.
-/// Used by counter-unless-pays, tax triggers (Esper Sentinel, Rhystic Study),
-/// and ward costs (CR 702.21a).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum UnlessCost {
-    /// Fixed mana cost (e.g., "unless that player pays {1}")
-    Fixed { cost: ManaCost },
-    /// Generic mana equal to a dynamic quantity (e.g., "where X is this creature's power")
-    DynamicGeneric { quantity: QuantityExpr },
-    /// CR 702.21a: Pay life as ward cost (e.g., "Ward—Pay 2 life")
-    PayLife { amount: i32 },
-    /// CR 107.14 + CR 118.12: Remove fixed energy counters as an unless cost.
-    PayEnergy { amount: u32 },
-    /// CR 701.9 + CR 702.21a: The resolved `UnlessPayModifier::payer`
-    /// discards a card as an unless/ward cost. `filter: None` means any card
-    /// in that payer's hand is eligible; `Some` restricts the eligible hand
-    /// cards by type/subtype/supertype.
-    DiscardCard {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TargetFilter>,
-    },
-    /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
-    Sacrifice { count: u32, filter: TargetFilter },
-    /// CR 118.12: Return N objects matching a filter to their owner's hand
-    /// as an unless cost. Source zone defaults to battlefield; Harvest Wurm
-    /// uses `from_zone: Some(Graveyard)`.
-    ReturnToHand {
-        count: u32,
-        filter: TargetFilter,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        from_zone: Option<crate::types::zones::Zone>,
-    },
-}
-
-/// CR 118.12: "Effect unless [player] pays {cost}"
-/// Wraps any effect with an opponent payment choice.
+/// CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}"
+/// Wraps any effect with a player payment choice. The cost is the unified
+/// `AbilityCost` taxonomy — historically a separate `UnlessCost` enum existed,
+/// but every variant collapsed cleanly into `AbilityCost` (fold completed
+/// 2026-05-09 audit batch H3/M1: `Fixed`/`DynamicGeneric` → `Mana`/`ManaDynamic`,
+/// `DiscardCard` → `Discard`, etc.).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnlessPayModifier {
-    pub cost: UnlessCost,
+    /// CR 118.12: The cost the player may choose to pay to prevent the effect.
+    /// Stored as the unified `AbilityCost` taxonomy (no parallel cost hierarchy).
+    /// Forward-compatible deserialization accepts the legacy `UnlessCost` JSON
+    /// shape so saved games / serialized triggers keep loading after the fold.
+    #[serde(deserialize_with = "deserialize_ability_cost_compat")]
+    pub cost: AbilityCost,
     /// Who must pay — resolved via TargetFilter at trigger resolution time.
     /// Typically TargetFilter::TriggeringPlayer for "that player".
     pub payer: TargetFilter,
+}
+
+/// Boxed variant of `deserialize_ability_cost_compat` for use on fields
+/// declared as `Box<AbilityCost>` (e.g.,
+/// `ManaAbilityResume::UnlessPayment.cost` is boxed to keep the enclosing
+/// enum compact). Same backward-compat behavior as the unboxed variant.
+pub fn deserialize_ability_cost_compat_boxed<'de, D>(d: D) -> Result<Box<AbilityCost>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_ability_cost_compat(d).map(Box::new)
+}
+
+/// Forward-compatible deserializer for `UnlessPayModifier::cost` and
+/// `WaitingFor::UnlessPayment::cost`.
+/// First tries the unified `AbilityCost` JSON shape, then falls back to the
+/// legacy `UnlessCost` shape so saved-game JSON / persisted trigger
+/// definitions keep loading after the 2026-05-09 fold.
+///
+/// Legacy → modern mapping (per audit batch H3/M1):
+/// - `Fixed { cost }` → `Mana { cost }`
+/// - `DynamicGeneric { quantity }` → `ManaDynamic { quantity }`
+/// - `PayLife { amount: i32 }` → `PayLife { amount: QuantityExpr::Fixed { value: amount } }`
+/// - `PayEnergy { amount }` → `PayEnergy { amount }` (identity)
+/// - `DiscardCard { filter }` → `Discard { count: 1, filter, random: false, self_ref: false }`
+/// - `Sacrifice { count, filter }` → `Sacrifice { target: filter, count }`
+/// - `ReturnToHand { count, filter, from_zone }` → `ReturnToHand { count, filter: Some(filter), from_zone }`
+pub fn deserialize_ability_cost_compat<'de, D>(d: D) -> Result<AbilityCost, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
+    // Try the modern AbilityCost shape first.
+    if let Ok(cost) = serde_json::from_value::<AbilityCost>(raw.clone()) {
+        return Ok(cost);
+    }
+    // Fall back to the legacy `UnlessCost` shape and translate.
+    let legacy: LegacyUnlessCost = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+    Ok(legacy.into_ability_cost())
+}
+
+/// CR 118.12: Legacy shadow type used ONLY by `deserialize_ability_cost_compat`
+/// to accept pre-fold serialized JSON. The variants and field names mirror the
+/// pre-2026-05-09 `UnlessCost` enum exactly. New code must NOT construct this
+/// type — it exists solely as a deserialization staging area.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum LegacyUnlessCost {
+    Fixed {
+        cost: ManaCost,
+    },
+    DynamicGeneric {
+        quantity: QuantityExpr,
+    },
+    PayLife {
+        amount: i32,
+    },
+    PayEnergy {
+        amount: u32,
+    },
+    DiscardCard {
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    Sacrifice {
+        count: u32,
+        filter: TargetFilter,
+    },
+    ReturnToHand {
+        count: u32,
+        filter: TargetFilter,
+        #[serde(default)]
+        from_zone: Option<Zone>,
+    },
+}
+
+impl LegacyUnlessCost {
+    fn into_ability_cost(self) -> AbilityCost {
+        match self {
+            LegacyUnlessCost::Fixed { cost } => AbilityCost::Mana { cost },
+            LegacyUnlessCost::DynamicGeneric { quantity } => AbilityCost::ManaDynamic { quantity },
+            LegacyUnlessCost::PayLife { amount } => AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: amount },
+            },
+            LegacyUnlessCost::PayEnergy { amount } => AbilityCost::PayEnergy { amount },
+            LegacyUnlessCost::DiscardCard { filter } => AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter,
+                random: false,
+                self_ref: false,
+            },
+            LegacyUnlessCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
+                target: filter,
+                count,
+            },
+            LegacyUnlessCost::ReturnToHand {
+                count,
+                filter,
+                from_zone,
+            } => AbilityCost::ReturnToHand {
+                count,
+                filter: Some(filter),
+                from_zone,
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3715,10 +3813,6 @@ pub enum Effect {
         /// Used by cards like Tishana's Tidebinder ("loses all abilities for as long as ~").
         #[serde(default)]
         source_static: Option<StaticDefinition>,
-        /// CR 118.12: "Counter target spell unless its controller pays {X}".
-        /// When present, the spell's controller may pay the cost to prevent the counter.
-        #[serde(default)]
-        unless_payment: Option<UnlessCost>,
     },
     /// CR 701.6 + CR 405.1: Mass counter — counter every spell or ability on
     /// the stack matching `target`. Mirrors `Effect::DestroyAll` /
@@ -9548,6 +9642,7 @@ mod tests {
             let cost = AbilityCost::ReturnToHand {
                 count: 1,
                 filter: None,
+                from_zone: None,
             };
             assert_eq!(cost.categories(), vec![CostCategory::ReturnsToHand]);
         }

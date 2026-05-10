@@ -763,6 +763,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         return Some(AbilityCost::ReturnToHand {
             count: 1,
             filter: None,
+            from_zone: None,
         });
     }
     let target_text = format!("target {filter_text}");
@@ -776,6 +777,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::ReturnToHand {
         count: 1,
         filter: Some(filter),
+        from_zone: None,
     })
 }
 
@@ -924,6 +926,7 @@ mod tests {
             AbilityCost::ReturnToHand {
                 count: 1,
                 filter: None,
+                from_zone: None,
             }
         );
     }
@@ -1279,9 +1282,14 @@ mod tests {
     #[test]
     fn cost_return_land_to_hand() {
         match parse_oracle_cost("Return a land you control to its owner's hand") {
-            AbilityCost::ReturnToHand { count, filter } => {
+            AbilityCost::ReturnToHand {
+                count,
+                filter,
+                from_zone,
+            } => {
                 assert_eq!(count, 1);
                 assert!(filter.is_some());
+                assert!(from_zone.is_none());
             }
             other => panic!("Expected ReturnToHand, got {:?}", other),
         }
@@ -1293,6 +1301,7 @@ mod tests {
             AbilityCost::ReturnToHand {
                 count,
                 filter: Some(TargetFilter::Typed(filter)),
+                from_zone: None,
             } => {
                 assert_eq!(count, 1);
                 assert_eq!(filter.get_subtype(), Some("Forest"));

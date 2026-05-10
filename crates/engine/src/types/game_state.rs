@@ -10,7 +10,7 @@ use super::ability::{
     ChooseFromZoneConstraint, ContinuousModification, CostPaidObjectSnapshot,
     DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
     ModalChoice, ResolvedAbility, SearchSelectionConstraint, StaticCondition, TargetFilter,
-    TargetRef, TriggerCondition, UnlessCost,
+    TargetRef, TriggerCondition,
 };
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
@@ -724,7 +724,13 @@ pub enum ManaAbilityResume {
         convoke_mode: Option<ConvokeMode>,
     },
     UnlessPayment {
-        cost: UnlessCost,
+        /// CR 118.12: Carried-through cost from `WaitingFor::UnlessPayment`.
+        /// See the matching `WaitingFor::UnlessPayment.cost` doc-comment for
+        /// the legacy-shape deserialization contract. Boxed so the
+        /// enclosing `ManaAbilityResume` enum stays compact (other variants
+        /// are zero-sized or carry only an `Option`).
+        #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat_boxed")]
+        cost: Box<AbilityCost>,
         pending_effect: Box<ResolvedAbility>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger_event: Option<GameEvent>,
@@ -1527,7 +1533,12 @@ pub enum WaitingFor {
     /// and ward costs (CR 702.21a).
     UnlessPayment {
         player: PlayerId,
-        cost: UnlessCost,
+        /// CR 118.12: The cost to pay. Stored as the unified `AbilityCost`
+        /// taxonomy. Forward-compatible deserialization accepts the legacy
+        /// `UnlessCost` JSON shape (see `deserialize_ability_cost_compat` in
+        /// `types/ability.rs`).
+        #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
+        cost: AbilityCost,
         /// The effect to execute if the player declines to pay.
         pending_effect: Box<ResolvedAbility>,
         /// Trigger event context to restore if declining the payment resumes a
