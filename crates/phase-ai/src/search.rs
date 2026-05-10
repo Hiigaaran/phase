@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
-use engine::types::actions::GameAction;
+use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -20,6 +20,24 @@ use crate::tactical_gate::gate_candidates;
 use crate::threat_profile::{
     build_threat_profile_multiplayer, ArchetypeBaseProbabilities, ThreatProfile,
 };
+
+/// CR 103.5b + Serum Powder Oracle text: return the first object in `player`'s
+/// hand named "Serum Powder", if any. Used by the AI mulligan-decision branch
+/// to auto-use a Powder rather than mulligan or, in the deterministic-default
+/// path, rather than blindly keep — Serum Powder is strictly better than a
+/// mulligan (no bottoming, no mulligan count increment).
+fn first_serum_powder_in_hand(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<engine::types::identifiers::ObjectId> {
+    let p = state.players.iter().find(|p| p.id == player)?;
+    p.hand.iter().copied().find(|oid| {
+        state
+            .objects
+            .get(oid)
+            .is_some_and(|o| o.name.eq_ignore_ascii_case("Serum Powder"))
+    })
+}
 
 /// AI safety cap on repeated activation of the same activated ability on the
 /// same source within a single turn. CR 117.1b permits unbounded activation
@@ -357,8 +375,20 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Replacement choice: pick the first option.
         WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
 
-        // Mulligan: keep the hand.
-        WaitingFor::MulliganDecision { .. } => Some(GameAction::MulliganDecision { keep: true }),
+        // CR 103.5 + 103.5b: Mulligan default = keep, unless the AI has a
+        // Serum Powder in hand, in which case use it first (auto-heuristic —
+        // see `first_serum_powder_in_hand`).
+        WaitingFor::MulliganDecision { pending, .. } => {
+            let entry = pending.first()?;
+            Some(match first_serum_powder_in_hand(state, entry.player) {
+                Some(object_id) => GameAction::MulliganDecision {
+                    choice: MulliganChoice::UseSerumPowder { object_id },
+                },
+                None => GameAction::MulliganDecision {
+                    choice: MulliganChoice::Keep,
+                },
+            })
+        }
         WaitingFor::MulliganBottomCards { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
@@ -965,9 +995,19 @@ pub(crate) fn deterministic_choice(
             turn_order,
             mulligan_count,
         );
-        return Some(GameAction::MulliganDecision {
-            keep: decision.keep,
-        });
+        // CR 103.5b + Serum Powder Oracle text: if the AI would mulligan and
+        // it has a Serum Powder in hand, prefer the Powder — it's a strictly
+        // better action than a mulligan (no bottoming, no mulligan count
+        // increment). When the registry says keep, take the keep — don't burn
+        // a Powder on a hand the policies already endorsed.
+        let choice = if decision.keep {
+            MulliganChoice::Keep
+        } else if let Some(object_id) = first_serum_powder_in_hand(state, player) {
+            MulliganChoice::UseSerumPowder { object_id }
+        } else {
+            MulliganChoice::Mulligan
+        };
+        return Some(GameAction::MulliganDecision { choice });
     }
 
     // Scry/Dig/Surveil: use card evaluation heuristics

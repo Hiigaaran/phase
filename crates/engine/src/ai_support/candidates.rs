@@ -8,7 +8,7 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
-use crate::types::actions::{CastChoice, GameAction, LearnOption};
+use crate::types::actions::{CastChoice, GameAction, LearnOption, MulliganChoice};
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
@@ -328,24 +328,42 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        // CR 103.5: For simultaneous mulligan, generate candidates for each
-        // pending player. AI search iterates over the cross-product; the
-        // engine accepts them in any arrival order.
+        // CR 103.5 + 103.5b: For simultaneous mulligan, generate candidates
+        // for each pending player. AI search iterates over the cross-product;
+        // the engine accepts them in any arrival order. When a pending player
+        // has one or more Serum Powders in hand, emit one `UseSerumPowder`
+        // candidate per Powder so the policy may pick that branch.
         WaitingFor::MulliganDecision { pending, .. } => pending
             .iter()
             .flat_map(|entry| {
-                [
+                let mut actions = vec![
                     candidate(
-                        GameAction::MulliganDecision { keep: true },
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::Keep,
+                        },
                         TacticalClass::Selection,
                         Some(entry.player),
                     ),
                     candidate(
-                        GameAction::MulliganDecision { keep: false },
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::Mulligan,
+                        },
                         TacticalClass::Selection,
                         Some(entry.player),
                     ),
-                ]
+                ];
+                for powder_id in serum_powders_in_hand(state, entry.player) {
+                    actions.push(candidate(
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::UseSerumPowder {
+                                object_id: powder_id,
+                            },
+                        },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ));
+                }
+                actions
             })
             .collect(),
         WaitingFor::MulliganBottomCards { pending } => pending
@@ -2728,6 +2746,25 @@ fn named_choice_actions(
                 TacticalClass::Selection,
                 Some(player),
             )
+        })
+        .collect()
+}
+
+/// CR 103.5b + Serum Powder Oracle text: collect every ObjectId in `player`'s
+/// hand whose object name is "Serum Powder" (CR 201.2 — name match is exact
+/// and case-insensitive on canonical English).
+fn serum_powders_in_hand(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let Some(p) = state.players.iter().find(|p| p.id == player) else {
+        return Vec::new();
+    };
+    p.hand
+        .iter()
+        .copied()
+        .filter(|oid| {
+            state
+                .objects
+                .get(oid)
+                .is_some_and(|o| o.name.eq_ignore_ascii_case("Serum Powder"))
         })
         .collect()
 }

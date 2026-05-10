@@ -53,6 +53,13 @@ export interface FormatConfig {
    * commander-style format strings client-side.
    */
   uses_commander: boolean;
+  /**
+   * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
+   * from any player in the `debug_permitted` set. Off by default. Orthogonal
+   * to format — applies on top of any `GameFormat`. Immutable for the life
+   * of a session.
+   */
+  allow_debug_actions: boolean;
 }
 
 /**
@@ -105,6 +112,12 @@ export interface LobbyGame {
    * the field entirely, so treating `undefined` as falsy is what we want.
    */
   is_p2p?: boolean;
+  /**
+   * `true` when the host enabled Sandbox mode for this game (debug actions
+   * permitted under host control). Browsers render a SANDBOX badge and prompt
+   * joiners to confirm before entering.
+   */
+  is_sandbox?: boolean;
   /** Draft-specific metadata. Present when the room is a draft pod. */
   draft_metadata?: DraftLobbyMetadata | null;
 }
@@ -828,6 +841,20 @@ export type LearnOption =
   | { type: "Rummage"; data: { card_id: ObjectId } }
   | { type: "Skip" };
 
+// ── Mulligan ─────────────────────────────────────────────────────────────
+
+// CR 103.5 + 103.5b: Player decision at a MulliganDecision prompt.
+//   Keep            — lock in the opening hand (CR 103.5).
+//   Mulligan        — shuffle hand back, redraw the starting hand size (CR 103.5).
+//   UseSerumPowder  — exile every card from hand including the Powder, redraw
+//                     the same number; mulligan counter unchanged (CR 103.5b
+//                     + Serum Powder Oracle text). `object_id` must reference
+//                     a card named "Serum Powder" in the actor's hand.
+export type MulliganChoice =
+  | { type: "Keep" }
+  | { type: "Mulligan" }
+  | { type: "UseSerumPowder"; data: { object_id: ObjectId } };
+
 // ── Distribution ─────────────────────────────────────────────────────────
 
 export type DistributionUnit =
@@ -908,7 +935,7 @@ export type GameAction =
   | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
   | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][] } }
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
-  | { type: "MulliganDecision"; data: { keep: boolean } }
+  | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
@@ -974,7 +1001,9 @@ export type GameAction =
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
   | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
-  | { type: "Debug"; data: DebugAction };
+  | { type: "Debug"; data: DebugAction }
+  | { type: "GrantDebugPermission"; data: { player_id: PlayerId } }
+  | { type: "RevokeDebugPermission"; data: { player_id: PlayerId } };
 
 // CR 605.3b + CR 106.1a: Shape of the prompt surfaced by WaitingFor::ChooseManaColor.
 export type ManaChoicePrompt =
@@ -1061,7 +1090,10 @@ export type GameEvent =
   | { type: "PowerToughnessChanged"; data: { object_id: ObjectId; power: number; toughness: number; power_delta: number; toughness_delta: number } }
   | { type: "RoomEntered"; data: { player_id: PlayerId; dungeon: DungeonId; room_index: number; room_name: string } }
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
-  | { type: "InitiativeTaken"; data: { player_id: PlayerId } };
+  | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
+  | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
+  | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
+  | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 
@@ -1126,6 +1158,12 @@ export interface GameState {
   next_timestamp: number;
   seat_order?: PlayerId[];
   format_config?: FormatConfig;
+  /**
+   * Players granted permission to submit `GameAction.Debug(_)` in a sandbox
+   * game. Empty in non-sandbox games. The host (PlayerId(0)) is always seeded
+   * into this set at game creation when the format flag is on.
+   */
+  debug_permitted?: PlayerId[];
   eliminated_players?: PlayerId[];
   dungeon_progress?: Record<string, { current_dungeon: DungeonId | null; current_room: number; completed: DungeonId[] }>;
   initiative?: PlayerId | null;

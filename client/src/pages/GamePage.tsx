@@ -781,11 +781,23 @@ function GamePageContent({
     [dispatch],
   );
 
+  // CR 103.5 + 103.5b: `id` encodes the three branches of MulliganChoice.
+  // "keep"           → MulliganChoice::Keep
+  // "mulligan"       → MulliganChoice::Mulligan
+  // "powder:<oid>"   → MulliganChoice::UseSerumPowder { object_id: <oid> }
   const handleMulliganChoice = useCallback(
     (id: string) => {
+      if (id.startsWith("powder:")) {
+        const objectId = Number(id.slice("powder:".length));
+        dispatch({
+          type: "MulliganDecision",
+          data: { choice: { type: "UseSerumPowder", data: { object_id: objectId } } },
+        });
+        return;
+      }
       dispatch({
         type: "MulliganDecision",
-        data: { keep: id === "keep" },
+        data: { choice: { type: id === "keep" ? "Keep" : "Mulligan" } },
       });
     },
     [dispatch],
@@ -1405,27 +1417,44 @@ function MulliganDecisionPrompt({
   const nextMulliganFree = freeFirstMulligan && mulliganCount === 0;
   const nextHandSize = 7 - Math.max(0, mulliganCount + 1 - (freeFirstMulligan ? 1 : 0));
 
+  // CR 103.5b + Serum Powder Oracle text: collect every Serum Powder in this
+  // player's hand. Each one exposes a dedicated "Use Serum Powder" button —
+  // the player picks which copy goes to exile with the rest of the hand.
+  const serumPowderIds: number[] = (player && objects
+    ? player.hand.filter((id) => {
+        const obj = objects[id];
+        return obj?.name?.toLowerCase() === "serum powder";
+      })
+    : []);
+
   if (!player || !objects) {
+    const fallbackOptions = [
+      {
+        id: "keep",
+        label: "Keep Hand",
+        description:
+          bottomOnKeep > 0
+            ? `Put ${bottomOnKeep} on the bottom`
+            : "No cards to the bottom",
+      },
+      {
+        id: "mulligan",
+        label: nextMulliganFree ? "Free Mulligan" : "Mulligan",
+        description: nextMulliganFree
+          ? "Shuffle and draw 7 — no cards to the bottom"
+          : "Shuffle and draw 7 again",
+      },
+      // CR 103.5b: A Powder option per Powder in hand (rare card, usually 0).
+      ...serumPowderIds.map((oid) => ({
+        id: `powder:${oid}`,
+        label: "Use Serum Powder",
+        description: "Exile every card in hand, draw the same number — not a mulligan",
+      })),
+    ];
     return (
       <ChoiceModal
         title={`London Mulligan (${mulliganCount} taken)`}
-        options={[
-          {
-            id: "keep",
-            label: "Keep Hand",
-            description:
-              bottomOnKeep > 0
-                ? `Put ${bottomOnKeep} on the bottom`
-                : "No cards to the bottom",
-          },
-          {
-            id: "mulligan",
-            label: nextMulliganFree ? "Free Mulligan" : "Mulligan",
-            description: nextMulliganFree
-              ? "Shuffle and draw 7 — no cards to the bottom"
-              : "Shuffle and draw 7 again",
-          },
-        ]}
+        options={fallbackOptions}
         onChoose={onChoose}
       />
     );
@@ -1460,6 +1489,17 @@ function MulliganDecisionPrompt({
               >
                 {nextMulliganFree ? "Free Mulligan" : `Mulligan to ${nextHandSize}`}
               </button>
+              {/* CR 103.5b: Render a Serum Powder button per Powder in hand. */}
+              {serumPowderIds.map((oid) => (
+                <button
+                  key={oid}
+                  onClick={() => onChoose(`powder:${oid}`)}
+                  className="rounded-[10px] border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20 hover:text-amber-100 lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                  title="Exile every card in your hand and draw the same number. Not a mulligan — count and bottoms unaffected."
+                >
+                  Use Serum Powder
+                </button>
+              ))}
               <button
                 onClick={() => onChoose("keep")}
                 className="rounded-[10px] bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] transition hover:bg-cyan-400 lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"

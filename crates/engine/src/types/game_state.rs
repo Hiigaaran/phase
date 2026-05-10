@@ -1029,20 +1029,19 @@ pub enum WaitingFor {
     Priority {
         player: PlayerId,
     },
-    /// CR 103.5: London mulligan — each un-kept player decides simultaneously.
-    /// The `pending` list holds every player who has not yet chosen "keep",
-    /// each with their current mulligan count. Players act in any order;
-    /// each `MulliganDecision { keep: true }` removes the actor from `pending`,
-    /// each `MulliganDecision { keep: false }` increments their count and
-    /// redraws but keeps them in `pending`. When `pending` is empty the flow
+    /// CR 103.5 + 103.5b: London mulligan — each un-kept player decides
+    /// simultaneously. The `pending` list holds every player who has not yet
+    /// chosen `MulliganChoice::Keep`, each with their current mulligan count.
+    /// Players act in any order; `Keep` removes the actor from `pending`,
+    /// `Mulligan` increments their count and redraws but keeps them in
+    /// `pending`, and `UseSerumPowder { object_id }` (CR 103.5b) exiles the
+    /// hand and redraws the same number without incrementing the count, also
+    /// keeping the player in `pending`. When `pending` is empty the flow
     /// advances to `MulliganBottomCards` (if anyone owes bottoms) or
     /// `finish_mulligans`.
     ///
-    /// CR 103.5b/103.5d deferred: round-boundary timing for "any time you
-    /// could mulligan" effects (e.g. Serum Powder) and Two-Headed Giant
-    /// team mulligans are not modeled. Each player's mulligan loop is
-    /// collapsed across rounds. Output state is equivalent for the scope
-    /// of cards currently supported.
+    /// CR 103.5d deferred: Two-Headed Giant team mulligans are not modeled
+    /// (the format lacks team semantics).
     MulliganDecision {
         pending: Vec<MulliganDecisionEntry>,
         /// CR 103.5c + Commander RC supplement: whether this game grants a
@@ -2922,6 +2921,14 @@ pub struct GameState {
     #[serde(default)]
     pub debug_mode: bool,
 
+    /// Set of players who have been granted permission to submit
+    /// `GameAction::Debug(_)` in a sandbox game. Initialized to the host's
+    /// `PlayerId` at game creation when `format_config.allow_debug_actions`
+    /// is true; empty otherwise. The host can grant/revoke entries via
+    /// `GameAction::GrantDebugPermission` / `RevokeDebugPermission`.
+    #[serde(default)]
+    pub debug_permitted: BTreeSet<PlayerId>,
+
     #[serde(default)]
     pub match_config: MatchConfig,
     #[serde(default)]
@@ -3605,6 +3612,7 @@ impl GameState {
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
             debug_mode: false,
+            debug_permitted: BTreeSet::new(),
         }
     }
 

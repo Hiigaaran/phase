@@ -185,6 +185,8 @@ fn check_actor_authorization(
         GameAction::SetPhaseStops { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
+            | GameAction::GrantDebugPermission { .. }
+            | GameAction::RevokeDebugPermission { .. }
             | GameAction::ReorderHand { .. }
     ) {
         return Ok(());
@@ -1015,14 +1017,61 @@ fn apply_action(
         });
     }
 
-    // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag.
+    // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag
+    // (engine-level: the action runs) and `debug_permitted` (transport-level:
+    // the player may submit). The transport layer (server-core / WASM) is
+    // responsible for enforcing per-player permission; this engine check is
+    // a defense-in-depth invariant — a player not in `debug_permitted` should
+    // never have reached `apply`.
     if let GameAction::Debug(debug_action) = action {
         if !state.debug_mode {
             return Err(EngineError::InvalidAction(
                 "Debug actions require debug_mode to be enabled".into(),
             ));
         }
-        return super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events);
+        if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
+            return Err(EngineError::InvalidAction(
+                "Debug actions require debug permission".into(),
+            ));
+        }
+        let description = debug_action.describe(state);
+        let mut result =
+            super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events)?;
+        result
+            .events
+            .push(crate::types::events::GameEvent::DebugActionUsed {
+                player_id: actor,
+                description,
+            });
+        return Ok(result);
+    }
+
+    // Sandbox host-only grant/revoke of debug permission. Server-core verifies
+    // the actor is the host (PlayerId(0)); this engine handler trusts that
+    // and applies the mutation. Emits a public audit event.
+    if let GameAction::GrantDebugPermission { player_id } = action {
+        state.debug_permitted.insert(*player_id);
+        events.push(crate::types::events::GameEvent::DebugPermissionGranted {
+            host: actor,
+            player_id: *player_id,
+        });
+        return Ok(ActionResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+    if let GameAction::RevokeDebugPermission { player_id } = action {
+        state.debug_permitted.remove(player_id);
+        events.push(crate::types::events::GameEvent::DebugPermissionRevoked {
+            host: actor,
+            player_id: *player_id,
+        });
+        return Ok(ActionResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
     }
 
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
@@ -2225,13 +2274,15 @@ fn apply_action(
                 convoke_mode: Some(mode),
             }
         }
-        (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { keep }) => {
-            // CR 103.5: `actor` is already authorized as a member of `pending`
-            // by `check_actor_authorization`. The mulligan module resolves the
-            // per-player state update and either re-emits MulliganDecision
-            // (with the actor removed if they kept) or advances to the next
+        (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
+            // CR 103.5 + 103.5b: `actor` is already authorized as a member of
+            // `pending` by `check_actor_authorization`. The mulligan module
+            // resolves the per-player state update and either re-emits
+            // MulliganDecision (with the actor removed if they kept, retained
+            // with bumped count if they mulliganed, or retained with the
+            // same count if they used Serum Powder) or advances to the next
             // phase when the pending set is empty.
-            mulligan::handle_mulligan_decision(state, actor, keep, &mut events)
+            mulligan::handle_mulligan_decision(state, actor, choice, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
         (WaitingFor::MulliganBottomCards { .. }, GameAction::SelectCards { cards }) => {
@@ -6330,8 +6381,13 @@ mod tests {
         assert_eq!(state.players[1].hand.len(), 7);
 
         // Player 0 keeps (apply_as_current picks first pending player = P0)
-        let result =
-            apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
+        let result = apply_as_current(
+            &mut state,
+            GameAction::MulliganDecision {
+                choice: crate::types::actions::MulliganChoice::Keep,
+            },
+        )
+        .unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::MulliganDecision { .. }
@@ -6339,8 +6395,13 @@ mod tests {
 
         // Player 1 keeps (apply_as_current now picks P1 since P0 was removed)
         // -> game starts, auto-advances to PreCombatMain
-        let result =
-            apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
+        let result = apply_as_current(
+            &mut state,
+            GameAction::MulliganDecision {
+                choice: crate::types::actions::MulliganChoice::Keep,
+            },
+        )
+        .unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {

@@ -210,6 +210,12 @@ impl GameSession {
         } else {
             MatchConfig::default()
         };
+        // Preserve sandbox seeding through rematch — the format flag is
+        // immutable, so debug capability survives the new game.
+        if self.state.format_config.allow_debug_actions {
+            self.state.debug_mode = true;
+            self.state.debug_permitted.insert(PlayerId(0));
+        }
     }
 
     pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta) {
@@ -533,6 +539,15 @@ impl SessionManager {
         } else {
             MatchConfig::default()
         };
+        // Sandbox capability: the engine-level `debug_mode` gate must agree
+        // with the transport-level `allow_debug_actions` flag, otherwise a
+        // sandbox-permitted action would pass the server gate only to be
+        // rejected inside `apply`. The host (PlayerId(0)) is seeded as the
+        // sole holder of debug permission; they grant/revoke for others.
+        if state.format_config.allow_debug_actions {
+            state.debug_mode = true;
+            state.debug_permitted.insert(PlayerId(0));
+        }
 
         let session = GameSession {
             game_code: game_code.clone(),
@@ -673,8 +688,42 @@ impl SessionManager {
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
 
-        if matches!(action, GameAction::Debug(_)) {
-            return Err("Debug actions are not permitted in multiplayer games".to_string());
+        // Sandbox capability gate. A `Debug(_)` is accepted only when the
+        // session was created in sandbox mode AND the submitting player is in
+        // the `debug_permitted` set. The set is host-managed via
+        // `GrantDebugPermission` / `RevokeDebugPermission` and is initialized
+        // to `{host}` when the game is sandbox-flagged.
+        if matches!(action, GameAction::Debug(_))
+            && !session.state.debug_permitted.contains(&player)
+        {
+            return Err(
+                "Debug actions are not permitted (Sandbox mode disabled or no permission)"
+                    .to_string(),
+            );
+        }
+
+        // Grant/Revoke debug permission: host-only, and only meaningful in a
+        // sandbox session. The host is always PlayerId(0). The host cannot
+        // revoke their own permission (would leave nobody able to debug).
+        const HOST_PLAYER: PlayerId = PlayerId(0);
+        match &action {
+            GameAction::GrantDebugPermission { .. } | GameAction::RevokeDebugPermission { .. } => {
+                if !session.state.format_config.allow_debug_actions {
+                    return Err("Sandbox mode is not enabled for this game".to_string());
+                }
+                if player != HOST_PLAYER {
+                    return Err("Only the host can grant or revoke debug permission".to_string());
+                }
+                if let GameAction::RevokeDebugPermission {
+                    player_id: target, ..
+                } = &action
+                {
+                    if *target == HOST_PLAYER {
+                        return Err("The host cannot revoke their own debug permission".to_string());
+                    }
+                }
+            }
+            _ => {}
         }
 
         // CancelAutoPass: any valid player can cancel their own flag regardless of whose turn it is.
@@ -1107,7 +1156,9 @@ mod tests {
                         let _ = mgr.handle_action(
                             &code,
                             &tok,
-                            GameAction::MulliganDecision { keep: true },
+                            GameAction::MulliganDecision {
+                                choice: engine::types::actions::MulliganChoice::Keep,
+                            },
                         );
                     }
                 }

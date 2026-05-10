@@ -1,6 +1,7 @@
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::effects::resolve_ability_chain;
 use crate::types::ability::AbilityKind;
+use crate::types::actions::MulliganChoice;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, MulliganBottomEntry, MulliganDecisionEntry, PendingBeginGameAbility, WaitingFor,
@@ -15,6 +16,12 @@ use super::zones;
 /// CR 103.4: Starting hand size is seven cards.
 const STARTING_HAND_SIZE: usize = 7;
 const MAX_MULLIGANS: u8 = 7;
+
+/// Card name that grants the CR 103.5b "you could mulligan" action implemented
+/// here. Match is case-insensitive and exact (CR 201.2 — name is the printed
+/// English name on the card). The rule applies to every card with this name,
+/// not to a specific printing.
+const SERUM_POWDER_NAME: &str = "Serum Powder";
 
 /// CR 103.5c + Commander RC supplement: whether `state` grants a free first
 /// mulligan. True for any multiplayer game (≥3 seats), and for duels in
@@ -36,15 +43,13 @@ fn bottom_count_for(mulligan_count: u8, free_first: bool) -> u8 {
 
 /// CR 103.4: Start the mulligan process — shuffle libraries and draw 7 for each player.
 ///
-/// CR 103.5: All players decide simultaneously. The returned
+/// CR 103.5 + 103.5b: All players decide simultaneously. The returned
 /// `WaitingFor::MulliganDecision` carries every living player in seat order;
-/// each may submit `MulliganDecision { keep }` in any arrival order.
+/// each may submit `MulliganDecision { choice }` in any arrival order, with
+/// `MulliganChoice::Keep`, `Mulligan`, or `UseSerumPowder { object_id }`.
 ///
-/// CR 103.5b/103.5d deferred: This implementation collapses CR 103.5's
-/// per-round structure into a single per-player loop. The output state is
-/// equivalent for the current set of supported cards (no Serum-Powder-class
-/// "any time you could mulligan" effects, no Two-Headed Giant team mulligans).
-/// If those land in scope, this flow must be split back into explicit rounds.
+/// CR 103.5d deferred: Two-Headed Giant team mulligans are not modeled — the
+/// engine has the format enum but no team/seating semantics yet.
 pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     events.push(GameEvent::MulliganStarted);
 
@@ -76,27 +81,34 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
     }
 }
 
-/// CR 103.5: Resolve one player's `MulliganDecision { keep }` action.
+/// CR 103.5 + 103.5b: Resolve one player's `MulliganDecision { choice }` action.
 ///
-/// - `keep: true` removes the player from `pending`. The player has locked in
-///   their hand for the game; their bottom-cards selection is deferred to the
-///   second phase (CR 103.5 second sentence: "all players who decided to take
-///   mulligans do so at the same time" — bottoms happen after every player
-///   has kept).
-/// - `keep: false` increments that player's `mulligan_count`, shuffles their
-///   hand back into their library, and redraws 7. The player remains in
-///   `pending` to decide again.
-/// - If incrementing reaches the maximum mulligan count (CR 103.5 final
-///   sentence: a player may not take a mulligan that would result in a
-///   zero-card hand), the player is force-removed from `pending` and will
-///   bottom every card in their hand.
+/// - `Keep` removes the player from `pending`. The player has locked in their
+///   hand for the game; their bottom-cards selection is deferred to the second
+///   phase (CR 103.5 second sentence: "all players who decided to take
+///   mulligans do so at the same time" — bottoms happen after every player has
+///   kept).
+/// - `Mulligan` increments that player's `mulligan_count`, shuffles their hand
+///   back into their library, and redraws the starting hand size. The player
+///   remains in `pending` to decide again.
+/// - `UseSerumPowder { object_id }` (CR 103.5b + Serum Powder Oracle text)
+///   exiles **every** card from the player's hand — including the named Serum
+///   Powder itself — and redraws the same number of cards. The player's
+///   `mulligan_count` is *not* incremented (this is not a mulligan). The
+///   player remains in `pending` and may then keep, mulligan, or use another
+///   Serum Powder if their new hand contains one.
+///
+/// If `Mulligan` brings the player to the maximum mulligan count (CR 103.5
+/// final sentence: a player may not take a mulligan that would result in a
+/// zero-card hand), the player is force-removed from `pending` and will
+/// bottom every card in their hand.
 ///
 /// When `pending` becomes empty, advance to `MulliganBottomCards` (or, if no
 /// one owes bottoms, directly to `finish_mulligans`).
 pub fn handle_mulligan_decision(
     state: &mut GameState,
     player: PlayerId,
-    keep: bool,
+    choice: MulliganChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, String> {
     let free_first = free_first_mulligan(state);
@@ -114,29 +126,108 @@ pub fn handle_mulligan_decision(
         .ok_or_else(|| format!("Player {:?} is not in the mulligan pending set", player))?;
     let current_count = pending[idx].mulligan_count;
 
-    // Record the final mulligan_count for the bottoms phase. Track in
-    // state.final_mulligan_counts indexed by PlayerId — populated as each
-    // player locks in their hand.
-    if keep {
-        record_final_count(state, player, current_count);
-        pending.remove(idx);
-    } else {
-        let new_count = current_count + 1;
-        shuffle_hand_into_library(state, player, events);
-        draw_n(state, player, STARTING_HAND_SIZE, events);
-
-        if new_count >= MAX_MULLIGANS {
-            // CR 103.5: A player may take mulligans until their opening hand
-            // would be zero cards. Force-remove from pending; the bottoms
-            // phase will bottom every card in their hand.
-            record_final_count(state, player, new_count);
+    match choice {
+        MulliganChoice::Keep => {
+            // Record the final mulligan_count for the bottoms phase. Track in
+            // state.final_mulligan_counts indexed by PlayerId — populated as
+            // each player locks in their hand.
+            record_final_count(state, player, current_count);
             pending.remove(idx);
-        } else {
-            pending[idx].mulligan_count = new_count;
+        }
+        MulliganChoice::Mulligan => {
+            let new_count = current_count + 1;
+            shuffle_hand_into_library(state, player, events);
+            draw_n(state, player, STARTING_HAND_SIZE, events);
+
+            if new_count >= MAX_MULLIGANS {
+                // CR 103.5: A player may take mulligans until their opening
+                // hand would be zero cards. Force-remove from pending; the
+                // bottoms phase will bottom every card in their hand.
+                record_final_count(state, player, new_count);
+                pending.remove(idx);
+            } else {
+                pending[idx].mulligan_count = new_count;
+            }
+        }
+        MulliganChoice::UseSerumPowder { object_id } => {
+            // CR 103.5b + Serum Powder Oracle text: validate the referenced
+            // object is in the actor's hand and is named "Serum Powder"
+            // (CR 201.2 — name match is exact), then exile the entire hand
+            // and redraw the same number of cards. Mulligan count unchanged.
+            handle_serum_powder(state, player, object_id, events)?;
+            // Player remains in `pending` with the same mulligan_count.
         }
     }
 
     Ok(advance_after_decision(state, pending, free_first, events))
+}
+
+/// CR 103.5b + Serum Powder Oracle text: "Any time you could mulligan and this
+/// card is in your hand, you may exile all the cards from your hand, then draw
+/// that many cards."
+///
+/// Validates `serum_powder_id` is in `player`'s hand and is named "Serum
+/// Powder" (case-insensitive — CR 201.2 names are case-canonical but card data
+/// casing should still tolerate variation). Then moves every card in the
+/// hand — including the Serum Powder itself — to exile, and draws that many
+/// cards. Does not shuffle, does not change the library, does not increment
+/// the mulligan counter.
+fn handle_serum_powder(
+    state: &mut GameState,
+    player: PlayerId,
+    serum_powder_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), String> {
+    let player_data = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .ok_or_else(|| format!("Player {:?} not found", player))?;
+
+    if !player_data.hand.contains(&serum_powder_id) {
+        return Err(format!(
+            "Serum Powder object {:?} is not in player {:?}'s hand",
+            serum_powder_id, player
+        ));
+    }
+
+    let referenced = state
+        .objects
+        .get(&serum_powder_id)
+        .ok_or_else(|| format!("Object {:?} not found", serum_powder_id))?;
+    if !referenced.name.eq_ignore_ascii_case(SERUM_POWDER_NAME) {
+        return Err(format!(
+            "Object {:?} is named {:?}, not Serum Powder — only Serum Powder cards may use this action",
+            serum_powder_id, referenced.name
+        ));
+    }
+
+    // CR 103.5b: Exile every card from the hand (including the Powder). The
+    // exiled cards are gone for the rest of the game (per the official ruling
+    // on Serum Powder, 2017-11-17).
+    let hand_ids: Vec<ObjectId> = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .hand
+        .iter()
+        .copied()
+        .collect();
+    let exiled_count = hand_ids.len();
+
+    for card_id in hand_ids {
+        zones::move_to_zone(state, card_id, Zone::Exile, events);
+    }
+
+    // CR 103.5b + Serum Powder Oracle text: "draw that many cards" — draw
+    // exactly the number we just exiled, regardless of the configured
+    // starting hand size. (In practice these are equal because the player is
+    // in the mulligan-decision phase with a full hand, but the rule is
+    // phrased as "that many" so we honor it literally.)
+    draw_n(state, player, exiled_count, events);
+
+    Ok(())
 }
 
 /// CR 103.5: Stash the locked-in mulligan count for `player` so the bottoms
@@ -391,10 +482,32 @@ mod tests {
         keep: bool,
         events: &mut Vec<GameEvent>,
     ) -> WaitingFor {
-        let wf = handle_mulligan_decision(state, player, keep, events)
+        let choice = if keep {
+            MulliganChoice::Keep
+        } else {
+            MulliganChoice::Mulligan
+        };
+        let wf = handle_mulligan_decision(state, player, choice, events)
             .expect("handle_mulligan_decision");
         state.waiting_for = wf.clone();
         wf
+    }
+
+    /// Test helper: submit a Serum Powder action on behalf of `player`.
+    fn use_serum_powder(
+        state: &mut GameState,
+        player: PlayerId,
+        object_id: ObjectId,
+        events: &mut Vec<GameEvent>,
+    ) -> Result<WaitingFor, String> {
+        let wf = handle_mulligan_decision(
+            state,
+            player,
+            MulliganChoice::UseSerumPowder { object_id },
+            events,
+        )?;
+        state.waiting_for = wf.clone();
+        Ok(wf)
     }
 
     fn bottom(
@@ -866,7 +979,9 @@ mod tests {
         let r = apply(
             &mut state,
             PlayerId(1),
-            GameAction::MulliganDecision { keep: true },
+            GameAction::MulliganDecision {
+                choice: MulliganChoice::Keep,
+            },
         );
         assert!(
             r.is_ok(),
@@ -971,5 +1086,201 @@ mod tests {
             Some(1),
             "Standard duel: after 1 mulligan, should bottom 1 card"
         );
+    }
+
+    /// Inject a Serum Powder into `player`'s hand and return its object id.
+    /// Replaces the object at `hand[slot]` so the hand size stays at 7.
+    fn inject_serum_powder(state: &mut GameState, player: PlayerId, slot: usize) -> ObjectId {
+        let object_id = state.players.iter().find(|p| p.id == player).unwrap().hand[slot];
+        state
+            .objects
+            .get_mut(&object_id)
+            .expect("hand object exists")
+            .name = SERUM_POWDER_NAME.to_string();
+        object_id
+    }
+
+    /// CR 103.5b + Serum Powder Oracle text: using Serum Powder exiles every
+    /// card in hand (including the Powder) and redraws the same number.
+    /// Mulligan count is unchanged; player stays pending.
+    #[test]
+    fn serum_powder_exiles_entire_hand_and_redraws() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        let powder_id = inject_serum_powder(&mut state, PlayerId(0), 0);
+        let original_hand: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+        let original_hand_size = original_hand.len();
+        let library_before = state.players[0].library.len();
+
+        let waiting = use_serum_powder(&mut state, PlayerId(0), powder_id, &mut events)
+            .expect("use_serum_powder");
+
+        // Every original hand card — including the Powder — is now in exile.
+        for card_id in &original_hand {
+            assert_eq!(
+                state.objects[card_id].zone,
+                Zone::Exile,
+                "card {:?} should be exiled",
+                card_id
+            );
+        }
+        // The Powder itself is in exile (not back in hand or library).
+        assert_eq!(state.objects[&powder_id].zone, Zone::Exile);
+
+        // Hand was refilled to the same size from the top of the library.
+        assert_eq!(state.players[0].hand.len(), original_hand_size);
+        assert_eq!(
+            state.players[0].library.len(),
+            library_before - original_hand_size
+        );
+
+        // None of the newly drawn cards are from the exiled set.
+        for new_card in state.players[0].hand.iter() {
+            assert!(
+                !original_hand.contains(new_card),
+                "new hand should not contain exiled card {:?}",
+                new_card
+            );
+        }
+
+        // Mulligan count unchanged (still 0); player still pending.
+        assert_eq!(decision_count_for(&waiting, PlayerId(0)), Some(0));
+        assert!(pending_decision_players(&waiting).contains(&PlayerId(0)));
+    }
+
+    /// CR 103.5b: After using Serum Powder the player may immediately keep.
+    /// They owe no bottom cards (mulligan count never incremented).
+    #[test]
+    fn serum_powder_then_keep_owes_no_bottoms() {
+        let mut state = setup_with_libraries(30);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        let powder_id = inject_serum_powder(&mut state, PlayerId(0), 0);
+        use_serum_powder(&mut state, PlayerId(0), powder_id, &mut events)
+            .expect("use_serum_powder");
+
+        // P0 keeps the refreshed hand; P1 keeps. Bottoms phase should be skipped.
+        decide(&mut state, PlayerId(0), true, &mut events);
+        let waiting = decide(&mut state, PlayerId(1), true, &mut events);
+        assert!(
+            matches!(waiting, WaitingFor::Priority { .. }),
+            "Serum Powder is not a mulligan; P0 should owe 0 bottoms — game should start, got {:?}",
+            waiting
+        );
+    }
+
+    /// CR 103.5b: Attempting `UseSerumPowder` on an object whose name is not
+    /// "Serum Powder" is rejected.
+    #[test]
+    fn serum_powder_rejects_non_powder_object() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        // Pick a hand object that is NOT a Powder.
+        let non_powder = state.players[0].hand[0];
+
+        let result = handle_mulligan_decision(
+            &mut state,
+            PlayerId(0),
+            MulliganChoice::UseSerumPowder {
+                object_id: non_powder,
+            },
+            &mut events,
+        );
+        assert!(
+            result.is_err(),
+            "non-Powder object must be rejected, got {:?}",
+            result
+        );
+    }
+
+    /// CR 103.5b: Attempting `UseSerumPowder` on an object that is in another
+    /// player's hand (or not in any hand) is rejected.
+    #[test]
+    fn serum_powder_rejects_object_not_in_actor_hand() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        // Inject a Powder into P1's hand, but try to use it from P0.
+        let p1_powder = inject_serum_powder(&mut state, PlayerId(1), 0);
+
+        let result = handle_mulligan_decision(
+            &mut state,
+            PlayerId(0),
+            MulliganChoice::UseSerumPowder {
+                object_id: p1_powder,
+            },
+            &mut events,
+        );
+        assert!(
+            result.is_err(),
+            "Powder not in actor's hand must be rejected, got {:?}",
+            result
+        );
+    }
+
+    /// CR 103.5b: Other pending players are unaffected by one player's Serum
+    /// Powder use — their entries remain in `pending` and they may still act.
+    #[test]
+    fn serum_powder_does_not_disturb_other_pending_players() {
+        let mut state = setup_n_player_with_libraries(4, 30);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        let powder_id = inject_serum_powder(&mut state, PlayerId(2), 0);
+        let waiting = use_serum_powder(&mut state, PlayerId(2), powder_id, &mut events)
+            .expect("use_serum_powder");
+
+        let pending = pending_decision_players(&waiting);
+        assert!(pending.contains(&PlayerId(0)));
+        assert!(pending.contains(&PlayerId(1)));
+        assert!(
+            pending.contains(&PlayerId(2)),
+            "P2 should still be pending after Powder use"
+        );
+        assert!(pending.contains(&PlayerId(3)));
+        // P0/P1/P3 still at count 0.
+        for &pid in &[PlayerId(0), PlayerId(1), PlayerId(3)] {
+            assert_eq!(decision_count_for(&waiting, pid), Some(0));
+        }
+        // P2's mulligan_count also still 0 (Powder is not a mulligan).
+        assert_eq!(decision_count_for(&waiting, PlayerId(2)), Some(0));
+    }
+
+    /// CR 103.5b: A player may use Serum Powder multiple times in a row if
+    /// each redraw produces another Powder.
+    #[test]
+    fn serum_powder_can_chain_when_redraw_yields_another_powder() {
+        let mut state = setup_with_libraries(40);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        // First Powder in hand.
+        let first_powder = inject_serum_powder(&mut state, PlayerId(0), 0);
+        // Re-name a card at the top of the library so that after exile+redraw,
+        // a fresh Powder lands in hand at index 0.
+        let top_of_library = state.players[0].library[0];
+        state.objects.get_mut(&top_of_library).unwrap().name = SERUM_POWDER_NAME.to_string();
+
+        // Use first Powder.
+        use_serum_powder(&mut state, PlayerId(0), first_powder, &mut events).unwrap();
+
+        // The renamed top-of-library object should now be in hand.
+        assert!(state.players[0].hand.contains(&top_of_library));
+        assert_eq!(
+            state.objects[&top_of_library].name, SERUM_POWDER_NAME,
+            "redrawn Powder's name should be preserved"
+        );
+
+        // Use it again. Should succeed.
+        let waiting = use_serum_powder(&mut state, PlayerId(0), top_of_library, &mut events)
+            .expect("second Powder use");
+        assert_eq!(decision_count_for(&waiting, PlayerId(0)), Some(0));
+        assert_eq!(state.objects[&top_of_library].zone, Zone::Exile);
     }
 }
