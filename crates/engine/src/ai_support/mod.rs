@@ -1060,6 +1060,50 @@ mod tests {
     }
 
     #[test]
+    fn legal_actions_by_object_exposes_filter_land_with_payable_mana_sub_cost() {
+        let mut state = setup_priority();
+        create_land(&mut state, "Forest", &["Forest"]);
+        let skycloud = create_land(&mut state, "Skycloud Expanse", &[]);
+        Arc::make_mut(&mut state.objects.get_mut(&skycloud).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::White, ManaColor::Blue],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+
+        let (_, _, grouped) = legal_actions_full(&state);
+
+        assert!(
+            bucket_has(
+                &grouped,
+                skycloud,
+                &GameAction::ActivateAbility {
+                    source_id: skycloud,
+                    ability_index: 0,
+                },
+            ),
+            "Skycloud Expanse should be manually activatable when another mana source can pay its {{1}} cost",
+        );
+    }
+
+    #[test]
     fn legal_actions_by_object_exposes_no_tap_sacrifice_mana_abilities() {
         let mut state = setup_priority();
         let altar = create_object(

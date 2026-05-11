@@ -789,21 +789,34 @@ fn advance_mana_ability_activation(
         }
     }
 
-    // CR 605.3a + CR 601.2h + CR 107.4e: Resolve the mana sub-cost payment before
-    // producing any mana or prompting for output choices. If the cost has hybrid
-    // shards (CR 107.4e) with more than one legal color assignment given the
-    // current pool, surface `PayManaAbilityMana` so the player picks. Unambiguous
-    // plans auto-pay.
+    // CR 605.3a + CR 602.2b + CR 601.2g-h + CR 107.4e: Resolve the mana
+    // sub-cost payment before producing any mana or prompting for output
+    // choices. If the current pool already offers multiple hybrid assignments,
+    // surface `PayManaAbilityMana` so the player picks. If the pool cannot
+    // cover the sub-cost yet, fall through to the real payment site, which may
+    // activate other mana abilities while paying this activation cost (CR
+    // 117.1d / CR 118.2).
     if pending.chosen_mana_payment.is_none() {
         if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
             let pool = &state.players[pending.player.0 as usize].mana_pool;
             let plans = enumerate_hybrid_payment_plans(pool, sub_cost);
             match plans.len() {
-                0 => {
+                0 if {
+                    let excluded_sources = std::collections::HashSet::from([pending.source_id]);
+                    !super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(
+                        state,
+                        pending.player,
+                        pending.source_id,
+                        sub_cost,
+                        &excluded_sources,
+                    )
+                } =>
+                {
                     return Err(EngineError::ActionNotAllowed(
                         "Cannot pay mana cost for mana ability".to_string(),
                     ));
                 }
+                0 => {}
                 1 => {
                     let mut updated = pending;
                     updated.chosen_mana_payment = Some(plans.into_iter().next().unwrap());
@@ -1549,11 +1562,11 @@ fn mana_type_to_single_shard(color: ManaType) -> crate::types::mana::ManaCostSha
     }
 }
 
-/// CR 605.3a + CR 601.2h: Debit a mana sub-cost from the activator's pool.
-/// If `hybrid_plan` is provided, hybrid shards are pinned to those colors;
-/// otherwise `pay_cost` auto-decides via the standard casting rules. An
-/// `InsufficientMana` error surfaces as `ActionNotAllowed` so the UI can
-/// recover cleanly (the pre-activation gate should have prevented this).
+/// CR 605.3a + CR 602.2b + CR 601.2g-h: Pay a mana sub-cost for an activated
+/// mana ability. If `hybrid_plan` is provided, hybrid shards are pinned to the
+/// colors chosen by `PayManaAbilityMana` and debited from the current pool.
+/// Otherwise, use the shared activation mana-payment building block so the
+/// player may activate other mana abilities while paying this activation cost.
 fn pay_mana_sub_cost(
     state: &mut GameState,
     source_id: ObjectId,
@@ -1562,6 +1575,18 @@ fn pay_mana_sub_cost(
     hybrid_plan: Option<&[ManaType]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    if hybrid_plan.is_none() {
+        let excluded_sources = std::collections::HashSet::from([source_id]);
+        return super::casting::pay_ability_mana_cost_excluding(
+            state,
+            player,
+            source_id,
+            cost,
+            events,
+            &excluded_sources,
+        );
+    }
+
     // CR 106.6: The mana sub-cost of a mana ability is paid as part of an
     // ability activation — spend-restrictions must be evaluated through
     // `allows_activation` (via `PaymentContext::Activation`), not through the
@@ -3979,6 +4004,93 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
         // Tap component also paid.
         assert!(state.objects.get(&ruins).unwrap().tapped);
+    }
+
+    #[test]
+    fn fixed_filter_land_activates_by_tapping_other_mana_source_for_sub_cost() {
+        // CR 117.1d + CR 118.2 + CR 602.2b + CR 605.3a: A mana ability with a
+        // mana activation cost may activate other mana abilities while paying
+        // that cost. Skycloud Expanse class: "{1}, {T}: Add {W}{U}."
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+        }
+        let skycloud = create_object(
+            &mut state,
+            CardId(502),
+            PlayerId(0),
+            "Skycloud Expanse".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        {
+            let obj = state.objects.get_mut(&skycloud).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        }
+
+        assert!(can_activate_mana_ability_now(
+            &state,
+            PlayerId(0),
+            skycloud,
+            0,
+            &ability,
+        ));
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            skycloud,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert!(state.objects.get(&forest).unwrap().tapped);
+        assert!(state.objects.get(&skycloud).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::White), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 2);
     }
 
     #[test]

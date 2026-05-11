@@ -30,7 +30,7 @@ use super::ability_utils::{
     has_legal_target_assignment_for_ability, modal_choice_for_player,
     target_constraints_from_modal,
 };
-use super::casting_costs::{self, auto_tap_mana_sources, check_additional_cost_or_pay};
+use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
 use super::mana_payment;
@@ -2208,14 +2208,18 @@ fn apply_cost_floor_inner(
         }
         let delta = floor - current;
 
-        // Top up generic mana to reach the floor. NoCost spells (e.g., free spells
-        // routed through alt-cost lanes) are not subject to the floor — Trinisphere
-        // affects only the *mana* component of the total cost (CR 601.2f).
-        if let ManaCost::Cost {
-            ref mut generic, ..
-        } = mana_cost
-        {
-            *generic = generic.saturating_add(delta);
+        // Top up generic mana to reach the floor. Alternative-cost and
+        // permission paths can reduce the payable mana component to zero
+        // (`NoCost`); the floor still sees that zero mana component and adds
+        // generic mana to reach the minimum.
+        match mana_cost {
+            ManaCost::Cost { generic, .. } => {
+                *generic = generic.saturating_add(delta);
+            }
+            ManaCost::NoCost => {
+                *mana_cost = ManaCost::generic(delta);
+            }
+            ManaCost::SelfManaCost => {}
         }
     }
 }
@@ -3693,12 +3697,16 @@ fn continue_with_prepared(
 
 fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::ModalChoice) -> bool {
     modal.constraints.iter().any(|constraint| {
+        let crate::types::ability::ModalSelectionConstraint::ConditionalMaxChoices {
+            condition,
+            ..
+        } = constraint
+        else {
+            return false;
+        };
         matches!(
-            constraint,
-            crate::types::ability::ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: ModalSelectionCondition::AdditionalCostPaid { .. },
-                ..
-            }
+            condition,
+            ModalSelectionCondition::AdditionalCostPaid { .. }
         )
     })
 }
@@ -4003,14 +4011,16 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
+    excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
-    super::casting_costs::auto_tap_mana_sources(
+    super::casting_costs::auto_tap_mana_sources_excluding(
         &mut simulated,
         player,
         cost,
         &mut tap_events,
         Some(source_id),
+        excluded_sources,
     );
 
     // CR 605.1b: A `TapsForMana` triggered mana ability (Fertile Ground / Wild
@@ -4059,6 +4069,7 @@ pub fn can_pay_cost_after_auto_tap(
         source_id,
         cost,
         spell_ctx.as_ref(),
+        &HashSet::new(),
     )
 }
 
@@ -4069,6 +4080,22 @@ pub fn can_pay_ability_mana_cost_after_auto_tap(
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+) -> bool {
+    can_pay_ability_mana_cost_after_auto_tap_excluding(
+        state,
+        player,
+        source_id,
+        cost,
+        &HashSet::new(),
+    )
+}
+
+pub(super) fn can_pay_ability_mana_cost_after_auto_tap_excluding(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
     let mut simulated = state.clone();
     if simulated.layers_dirty {
@@ -4087,6 +4114,7 @@ pub fn can_pay_ability_mana_cost_after_auto_tap(
         source_id,
         cost,
         Some(&activation_ctx),
+        excluded_sources,
     )
 }
 
@@ -4209,6 +4237,17 @@ pub(super) fn pay_ability_mana_cost(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    pay_ability_mana_cost_excluding(state, player, source_id, cost, events, &HashSet::new())
+}
+
+pub(super) fn pay_ability_mana_cost_excluding(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Result<(), EngineError> {
     if state.layers_dirty {
         super::layers::evaluate_layers(state);
     }
@@ -4219,7 +4258,7 @@ pub(super) fn pay_ability_mana_cost(
         source_subtypes: &source_subtypes,
     };
 
-    let _spent_units = auto_tap_and_pay_cost(
+    let _spent_units = auto_tap_and_pay_cost_excluding(
         state,
         player,
         source_id,
@@ -4227,6 +4266,7 @@ pub(super) fn pay_ability_mana_cost(
         Some(&activation_ctx),
         None,
         events,
+        excluded_sources,
     )?;
 
     Ok(())
@@ -4245,7 +4285,37 @@ fn auto_tap_and_pay_cost(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
-    auto_tap_mana_sources(state, player, cost, events, Some(source_id));
+    auto_tap_and_pay_cost_excluding(
+        state,
+        player,
+        source_id,
+        cost,
+        ctx,
+        phyrexian_choices,
+        events,
+        &HashSet::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn auto_tap_and_pay_cost_excluding(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
+    super::casting_costs::auto_tap_mana_sources_excluding(
+        state,
+        player,
+        cost,
+        events,
+        Some(source_id),
+        excluded_sources,
+    );
 
     {
         let player_data = state
@@ -10365,6 +10435,70 @@ mod tests {
         assert!(ability.context.additional_cost_paid);
         assert_eq!(ability.context.kickers_paid, vec![KickerVariant::First]);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
+    }
+
+    #[test]
+    fn modal_escalate_pays_tap_creature_cost_for_extra_mode() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_modal_charm(&mut state, PlayerId(0));
+        let helper = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&helper)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.modal.as_mut().unwrap().max_choices = 3;
+            obj.keywords
+                .push(Keyword::Escalate(AbilityCost::TapCreatures {
+                    count: 1,
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                }));
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![1, 2], &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::TapCreaturesForSpellCost {
+                count, creatures, ..
+            } => {
+                assert_eq!(*count, 1);
+                assert_eq!(creatures, &vec![helper]);
+            }
+            other => panic!("expected TapCreaturesForSpellCost, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![helper],
+            },
+        )
+        .unwrap();
+
+        assert!(state.objects[&helper].tapped);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(
+            state.stack[0].kind,
+            StackEntryKind::Spell {
+                ability: Some(_),
+                ..
+            }
+        ));
     }
 
     fn create_kicker_instead_target_spell(state: &mut GameState) -> (ObjectId, ObjectId, ObjectId) {
@@ -17631,5 +17765,24 @@ mod tests {
         let mut cost = state.objects[&spell].mana_cost.clone();
         apply_cost_floor(&state, PlayerId(0), spell, &mut cost);
         assert_eq!(cost, ManaCost::generic(5), "floor of 5 must lift mv=2 to 5");
+    }
+
+    /// CR 601.2f: A zero mana component from an alternative/free-cast path is
+    /// still below the floor. Trinisphere must convert that zero component into
+    /// the minimum payable generic cost.
+    #[test]
+    fn trinisphere_floors_no_cost_spell_to_three() {
+        let mut state = setup_game_at_main_phase();
+        add_trinisphere(&mut state, PlayerId(0));
+        let spell = create_stack_spell(&mut state, PlayerId(0), ManaCost::NoCost);
+
+        let mut cost = state.objects[&spell].mana_cost.clone();
+        apply_cost_floor(&state, PlayerId(0), spell, &mut cost);
+
+        assert_eq!(
+            cost,
+            ManaCost::generic(3),
+            "Trinisphere must floor a free spell's zero mana component to {{3}}"
+        );
     }
 }
