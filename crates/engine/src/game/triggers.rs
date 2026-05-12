@@ -2954,6 +2954,36 @@ pub mod tests {
     }
 
     #[test]
+    fn soulbond_pair_choice_ignores_targeting_restrictions() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_soulbond_creature(&mut state, PlayerId(0), "Soulbond Source");
+        let shrouded = make_creature(&mut state, PlayerId(0), "Shrouded Partner", 1, 1);
+        let _other = make_creature(&mut state, PlayerId(0), "Other Partner", 1, 1);
+        {
+            let obj = state.objects.get_mut(&shrouded).unwrap();
+            obj.keywords.push(Keyword::Shroud);
+            obj.base_keywords.push(Keyword::Shroud);
+        }
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        select_soulbond_target_and_accept(&mut state, shrouded);
+
+        assert_eq!(state.objects[&source].paired_with, Some(shrouded));
+        assert_eq!(state.objects[&shrouded].paired_with, Some(source));
+    }
+
+    #[test]
     fn soulbond_other_creature_enters_pairs_with_source() {
         let mut state = setup();
         state.active_player = PlayerId(0);
@@ -3054,6 +3084,14 @@ pub mod tests {
         crate::game::pairing::cleanup_invalid_pairs(&mut state);
         assert_eq!(state.objects[&e].paired_with, None);
         assert_eq!(state.objects[&f].paired_with, None);
+
+        let low = make_creature(&mut state, PlayerId(0), "Low", 2, 2);
+        let high = make_creature(&mut state, PlayerId(0), "High", 2, 2);
+        assert!(high.0 > low.0);
+        state.objects.get_mut(&high).unwrap().paired_with = Some(low);
+        crate::game::pairing::cleanup_invalid_pairs(&mut state);
+        assert_eq!(state.objects[&high].paired_with, None);
+        assert_eq!(state.objects[&low].paired_with, None);
     }
 
     #[test]
