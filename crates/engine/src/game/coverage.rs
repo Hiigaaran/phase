@@ -6133,8 +6133,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // Covers "damage can't be prevented" (AddRestriction/DamagePreventionDisabled),
         // "you may cast ... from" (CastFromZone), and similar patterns where the parser
         // produces the correct effect but doesn't attach a description string.
-        let covered_by_ability_effect_type = face.abilities.iter().any(|a| {
-            let pred = |d: &AbilityDefinition| match &*d.effect {
+        let ability_effect_type_matches: Vec<&AbilityDefinition> = {
+            let line_matches_effect_type = |d: &AbilityDefinition| match &*d.effect {
                 Effect::AddRestriction { restriction, .. } => {
                     matches!(
                         restriction,
@@ -6194,8 +6194,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 }
                 _ => false,
             };
-            ability_tree_any(a, &pred)
-        });
+            face.abilities
+                .iter()
+                .filter(|a| ability_tree_any(a, &line_matches_effect_type))
+                .collect()
+        };
+        let covered_by_ability_effect_type = !ability_effect_type_matches.is_empty();
 
         // Replacement effects matched by event type when description doesn't align.
         // Covers "prevent ... damage", "enters with ... counter", damage redirection,
@@ -6335,6 +6339,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 .iter()
                 .any(|a| ability_tree_any(a, &|d| pred(d)))
         };
+        let covered_ability_effect_type_any = |pred: &dyn Fn(&AbilityDefinition) -> bool| -> bool {
+            ability_effect_type_matches
+                .iter()
+                .any(|a| ability_tree_any(a, &|d| pred(d)))
+        };
         // 1. Condition check: does Oracle text contain condition language?
         if let Some(cond_label) = line_has_condition_text(&lower) {
             // Skip condition check for replacement effects — the "if" is inherently
@@ -6371,6 +6380,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             } else {
                 matched.iter().any(|e| e.has_duration())
                     || modal_any(&|d: &AbilityDefinition| d.duration.is_some())
+                    || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
+                        d.duration.is_some()
+                    })
                     // Fallback: for saga chapter lines, the matched element may be a static
                     // but the duration lives on the trigger's execute ability. Check all triggers.
                     || face.triggers.iter().any(|t| {
@@ -6451,6 +6463,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 } else {
                     matched.iter().any(|e| e.has_pump(power, toughness))
                         || modal_any(&|d: &AbilityDefinition| {
+                            pump_matches_oracle(d, power, toughness)
+                        })
+                        || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
                             pump_matches_oracle(d, power, toughness)
                         })
                 };
@@ -8457,6 +8472,47 @@ mod tests {
                     || matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
             }),
             "Split line should accept duration/pump on the matching clause: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_accepts_descriptionless_delayed_trigger_pump_duration() {
+        let mut face = make_face();
+        let oracle = "Whenever a creature blocks this turn, it gets +0/+1 until end of turn.";
+        face.oracle_text = Some(oracle.to_string());
+
+        let delayed_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Pump {
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::TriggeringSource,
+            },
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut delayed_trigger = TriggerDefinition::new(TriggerMode::Blocks);
+        delayed_trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature()));
+
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(delayed_trigger),
+                },
+                effect: Box::new(delayed_effect),
+                uses_tracked_set: false,
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| {
+                matches!(f, SemanticFinding::DroppedDuration { .. })
+                    || matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
+            }),
+            "Descriptionless delayed trigger should credit nested pump/duration: {findings:?}"
         );
     }
 

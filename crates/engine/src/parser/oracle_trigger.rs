@@ -3258,6 +3258,15 @@ fn try_parse_event(
                 .filter(|r| !r.starts_with("er") && !r.starts_with("ing"))
         });
     if let Some(after) = attacks_result {
+        let attacks_and_isnt_blocked = value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>(" and isn't blocked"),
+                tag(" and isn\u{2019}t blocked"),
+            )),
+        )
+        .parse(after)
+        .is_ok();
         // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
         fn parse_attack_target(input: &str) -> OracleResult<'_, AttackTargetFilter> {
             alt((
@@ -3277,7 +3286,11 @@ fn try_parse_event(
         }
         let attack_target_filter = parse_attack_target.parse(after).ok().map(|(_, f)| f);
         let mut def = make_base();
-        def.mode = TriggerMode::Attacks;
+        def.mode = if attacks_and_isnt_blocked && matches!(subject, TargetFilter::SelfRef) {
+            TriggerMode::AttackerUnblocked
+        } else {
+            TriggerMode::Attacks
+        };
         def.valid_card = Some(subject.clone());
         def.attack_target_filter = attack_target_filter;
         if matches!(
@@ -6884,6 +6897,29 @@ mod tests {
             "Goblin Guide",
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
+    }
+
+    #[test]
+    fn trigger_attacks_and_isnt_blocked_uses_unblocked_mode_and_combat_duration() {
+        let def = parse_trigger_line(
+            "Whenever Murk Dwellers attacks and isn't blocked, it gets +2/+0 until end of combat.",
+            "Murk Dwellers",
+        );
+        assert_eq!(def.mode, TriggerMode::AttackerUnblocked);
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfCombat));
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Pump {
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(0),
+                    ..
+                }
+            ),
+            "expected self pump, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]

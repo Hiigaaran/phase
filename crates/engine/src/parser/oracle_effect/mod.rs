@@ -11583,6 +11583,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
                 player: PlayerScope::Controller,
             },
         ),
+        (" until end of combat", Duration::UntilEndOfCombat),
         // CR 611.2a + CR 108.3: Third-person "their next turn" appears in grants
         // whose grantee is not the ability's controller (Suspend Aggression:
         // "its owner may play it"; Expedited Inheritance: "its controller may

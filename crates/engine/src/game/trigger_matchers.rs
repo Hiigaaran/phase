@@ -1439,20 +1439,17 @@ pub(super) fn match_attacker_unblocked(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::BlockersDeclared { assignments } = event {
-        // Source must be an attacker in the current combat
-        let is_attacker = state
+    if let GameEvent::BlockersDeclared { .. } = event {
+        state
             .combat
             .as_ref()
-            .map(|c| c.attackers.iter().any(|a| a.object_id == source_id))
-            .unwrap_or(false);
-        if !is_attacker {
-            return false;
-        }
-        // Source must not be among the blocked attackers
-        !assignments
-            .iter()
-            .any(|(_, attacker)| *attacker == source_id)
+            .and_then(|combat| {
+                combat
+                    .attackers
+                    .iter()
+                    .find(|attacker| attacker.object_id == source_id)
+            })
+            .is_some_and(|attacker| !attacker.blocked)
     } else {
         false
     }
@@ -3428,6 +3425,34 @@ mod tests {
         };
         let trigger = make_trigger(TriggerMode::AttackerUnblocked);
         assert!(match_attacker_unblocked(&event, &trigger, attacker, &state));
+    }
+
+    #[test]
+    fn attacker_unblocked_uses_sticky_combat_blocked_state() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut attacker_info =
+            crate::game::combat::AttackerInfo::attacking_player(attacker, PlayerId(1));
+        attacker_info.blocked = true;
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![attacker_info],
+            ..Default::default()
+        });
+
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![],
+        };
+        let trigger = make_trigger(TriggerMode::AttackerUnblocked);
+        assert!(!match_attacker_unblocked(
+            &event, &trigger, attacker, &state
+        ));
     }
 
     #[test]
