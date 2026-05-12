@@ -1,7 +1,7 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, collect_shared_active_continuous_effects,
-    order_active_continuous_effects,
+    evaluate_condition_with_recipient, order_active_continuous_effects,
 };
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::ContinuousModification;
@@ -77,6 +77,15 @@ fn collect_applicable_off_zone_keyword_effects(
                         effect.controller,
                     ),
                 )
+                && effect.condition.as_ref().is_none_or(|condition| {
+                    evaluate_condition_with_recipient(
+                        state,
+                        condition,
+                        effect.controller,
+                        effect.source_id,
+                        object_id,
+                    )
+                })
         })
         .collect()
 }
@@ -132,7 +141,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, Duration, QuantityExpr, StaticDefinition, TargetFilter,
+        ContinuousModification, Duration, QuantityExpr, StaticCondition, StaticDefinition,
+        TargetFilter,
     };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::{DynamicKeywordKind, FlashbackCost, Keyword, KeywordKind};
@@ -274,6 +284,49 @@ mod tests {
             );
 
         assert!(off_zone_has_keyword_kind(
+            &state,
+            target_id,
+            KeywordKind::Flashback
+        ));
+    }
+
+    #[test]
+    fn off_zone_keyword_static_respects_condition() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Conditional Source",
+            Zone::Battlefield,
+        );
+        let target_id = create_card(&mut state, PlayerId(0), "Consider", Zone::Graveyard);
+
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: target_id })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+                    }])
+                    .condition(StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::SpecificObject { id: source_id }),
+                    }),
+            );
+        assert!(off_zone_has_keyword_kind(
+            &state,
+            target_id,
+            KeywordKind::Flashback
+        ));
+
+        state.objects.get_mut(&source_id).unwrap().zone = Zone::Graveyard;
+        state.battlefield.retain(|id| *id != source_id);
+        state.players[0].graveyard.push_back(source_id);
+
+        assert!(!off_zone_has_keyword_kind(
             &state,
             target_id,
             KeywordKind::Flashback

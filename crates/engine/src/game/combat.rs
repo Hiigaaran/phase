@@ -325,14 +325,13 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
 /// SelfRef), an Equipment attached to it (CR 301.5a + `FilterProp::EquippedBy`),
 /// or an Aura attached to it (CR 303.4 + `FilterProp::EnchantedBy`) — so this
 /// scan iterates the whole battlefield rather than only the attacker's own
-/// `static_definitions`. CR 604.1 / CR 613.1 condition gating and the
-/// CR 702.26b / CR 114.4 functioning gate are applied via
-/// `battlefield_active_statics`.
+/// `static_definitions`. CR 702.26b functioning gates are applied before
+/// recipient-relative CR 604.1 / CR 613.1 condition gating.
 fn block_restriction_statics_against<'a>(
     state: &'a GameState,
     attacker_id: ObjectId,
 ) -> impl Iterator<Item = (&'a GameObject, &'a StaticDefinition)> + 'a {
-    super::functioning_abilities::battlefield_active_statics(state)
+    super::functioning_abilities::battlefield_functioning_statics(state)
         .filter(|(_, def)| {
             matches!(
                 def.mode,
@@ -353,6 +352,17 @@ fn block_restriction_statics_against<'a>(
                 filter,
                 &FilterContext::from_source(state, src.id),
             ),
+        })
+        .filter(move |(src, def)| {
+            def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    attacker_id,
+                )
+            })
         })
 }
 
@@ -2702,6 +2712,46 @@ mod tests {
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
         // Symbolic per-pair check must agree.
         assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 613.4c: Recipient-relative conditions on Equipment
+    /// statics evaluate against the equipped attacker, not the Equipment.
+    #[test]
+    fn equipment_granted_cant_be_blocked_condition_reads_attacker_power() {
+        use crate::types::ability::{
+            Comparator, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
+            StaticDefinition, TargetFilter, TypedFilter,
+        };
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Small Rogue", 3, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        let tools = create_creature(&mut state, PlayerId(0), "Thieves' Tools", 0, 0);
+        let tools_obj = state.objects.get_mut(&tools).unwrap();
+        tools_obj.attached_to = Some(attacker.into());
+        tools_obj.static_definitions.push(
+            StaticDefinition::new(StaticMode::CantBeBlocked)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                ))
+                .condition(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Recipient,
+                        },
+                    },
+                    comparator: Comparator::LE,
+                    rhs: QuantityExpr::Fixed { value: 3 },
+                }),
+        );
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+
+        let attacker_obj = state.objects.get_mut(&attacker).unwrap();
+        attacker_obj.power = Some(4);
+        attacker_obj.base_power = Some(4);
+        assert!(can_block_pair(&state, blocker, attacker));
     }
 
     /// CR 509.1b: Detaching the Equipment must restore blockability — the

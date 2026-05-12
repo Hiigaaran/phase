@@ -1813,6 +1813,7 @@ fn static_condition_to_ability_condition(
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }

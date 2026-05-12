@@ -110,6 +110,23 @@ pub fn game_active_statics(
         .flat_map(move |obj| active_static_definitions(state, obj).map(move |def| (obj, def)))
 }
 
+/// Game-scope iteration of static abilities that function from public sources,
+/// with object-function gates applied but without condition filtering.
+///
+/// Use this when a caller must evaluate the condition with additional context,
+/// such as the affected object for recipient-relative static quantities.
+pub fn game_functioning_statics(
+    state: &GameState,
+) -> impl Iterator<Item = (&GameObject, &StaticDefinition)> {
+    state
+        .battlefield
+        .iter()
+        .chain(state.command_zone.iter())
+        .filter_map(move |id| state.objects.get(id))
+        .filter(|obj| object_functions(obj))
+        .flat_map(move |obj| obj.static_definitions.iter_all().map(move |def| (obj, def)))
+}
+
 /// Like `battlefield_active_statics` but WITHOUT condition filtering.
 ///
 /// Applies only the CR 702.26b phased-out gate and the CR 114.4

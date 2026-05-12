@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ContinuousModification, TargetFilter};
+use super::ability::{ContinuousModification, StaticCondition, TargetFilter};
 use super::identifiers::ObjectId;
 use super::player::PlayerId;
 use super::statics::StaticMode;
@@ -143,6 +143,7 @@ pub struct ActiveContinuousEffect {
     pub timestamp: u64,
     pub modification: ContinuousModification,
     pub affected_filter: TargetFilter,
+    pub condition: Option<StaticCondition>,
     pub mode: StaticMode,
     /// True for characteristic-defining abilities (CDAs), which are processed
     /// before other effects within their layer per CR 604.3.

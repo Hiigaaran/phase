@@ -3507,6 +3507,109 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
     None
 }
 
+fn parse_attached_static_condition(text: &str) -> Option<StaticCondition> {
+    parse_static_condition(text).map(rebind_source_object_quantities_to_recipient)
+}
+
+fn rebind_source_object_quantities_to_recipient(condition: StaticCondition) -> StaticCondition {
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => StaticCondition::QuantityComparison {
+            lhs: rebind_source_object_quantity_expr_to_recipient(lhs),
+            comparator,
+            rhs: rebind_source_object_quantity_expr_to_recipient(rhs),
+        },
+        StaticCondition::And { conditions } => StaticCondition::And {
+            conditions: conditions
+                .into_iter()
+                .map(rebind_source_object_quantities_to_recipient)
+                .collect(),
+        },
+        StaticCondition::Or { conditions } => StaticCondition::Or {
+            conditions: conditions
+                .into_iter()
+                .map(rebind_source_object_quantities_to_recipient)
+                .collect(),
+        },
+        StaticCondition::Not { condition } => StaticCondition::Not {
+            condition: Box::new(rebind_source_object_quantities_to_recipient(*condition)),
+        },
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        } => StaticCondition::RecipientHasCounters {
+            counters,
+            minimum,
+            maximum,
+        },
+        other => other,
+    }
+}
+
+fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr) -> QuantityExpr {
+    match expr {
+        QuantityExpr::Ref { qty } => QuantityExpr::Ref {
+            qty: rebind_source_object_quantity_ref_to_recipient(qty),
+        },
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
+            inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
+            divisor,
+            rounding,
+        },
+        QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
+            inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
+            offset,
+        },
+        QuantityExpr::Multiply { inner, factor } => QuantityExpr::Multiply {
+            inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
+            factor,
+        },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_source_object_quantity_expr_to_recipient)
+                .collect(),
+        },
+        QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
+            max: Box::new(rebind_source_object_quantity_expr_to_recipient(*max)),
+        },
+        QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
+            base,
+            exponent: Box::new(rebind_source_object_quantity_expr_to_recipient(*exponent)),
+        },
+        other => other,
+    }
+}
+
+fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -> QuantityRef {
+    match qty {
+        QuantityRef::Power {
+            scope: ObjectScope::Source,
+        } => QuantityRef::Power {
+            scope: ObjectScope::Recipient,
+        },
+        QuantityRef::Toughness {
+            scope: ObjectScope::Source,
+        } => QuantityRef::Toughness {
+            scope: ObjectScope::Recipient,
+        },
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Source,
+        } => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Recipient,
+        },
+        other => other,
+    }
+}
+
 fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
     let (_, unless_text) = tp.split_around(" unless ")?;
     parse_static_condition(unless_text.original)
@@ -6301,6 +6404,7 @@ fn parse_enchanted_equipped_predicate(
     description: &str,
 ) -> Option<StaticDefinition> {
     let pred_lower = predicate.to_lowercase();
+    let pred_tp = TextPair::new(predicate, &pred_lower);
 
     // --- Non-standard keyword phrasings (check before continuous grants) ---
 
@@ -6336,20 +6440,38 @@ fn parse_enchanted_equipped_predicate(
     }
 
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
-    if nom_tag_lower(&pred_lower, &pred_lower, "can't be blocked").is_some() {
+    let (body_tp, suffix_condition) =
+        if let Some((body_tp, condition_tp)) = pred_tp.split_around(" as long as ") {
+            let condition_text = condition_tp.original.trim().trim_end_matches('.');
+            (
+                body_tp,
+                Some(parse_attached_static_condition(condition_text).unwrap_or(
+                    StaticCondition::Unrecognized {
+                        text: condition_text.to_string(),
+                    },
+                )),
+            )
+        } else {
+            (pred_tp, None)
+        };
+    let body_lower = body_tp.lower;
+
+    if nom_tag_lower(body_lower, body_lower, "can't be blocked").is_some() {
         // "can't be blocked except by" → CantBeBlockedExceptBy
-        if let Some(rest) = nom_tag_lower(&pred_lower, &pred_lower, "can't be blocked except by ") {
+        if let Some(rest) = nom_tag_lower(body_lower, body_lower, "can't be blocked except by ") {
             let filter_text = rest.trim_end_matches('.');
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
-                    filter: filter_text.to_string(),
-                })
-                .affected(affected)
-                .description(description.to_string()),
-            );
+            let mut def = StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+                filter: filter_text.to_string(),
+            })
+            .affected(affected)
+            .description(description.to_string());
+            if let Some(condition) = suffix_condition {
+                def.condition = Some(condition);
+            }
+            return Some(def);
         }
         // CR 509.1b: "can't be blocked by <filter>" → CantBeBlockedBy
-        if let Some(rest) = nom_tag_lower(&pred_lower, &pred_lower, "can't be blocked by ") {
+        if let Some(rest) = nom_tag_lower(body_lower, body_lower, "can't be blocked by ") {
             let filter_text = rest.trim_end_matches('.');
             // CR 105.4 + CR 608.2c (issue #327): see parallel comment in
             // `parse_static_line_inner`'s CantBeBlockedBy branch.
@@ -6359,33 +6481,37 @@ fn parse_enchanted_equipped_predicate(
                 f
             });
             if !matches!(filter, TargetFilter::Any) {
-                return Some(
-                    StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
-                        .affected(affected)
-                        .description(description.to_string()),
-                );
+                let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
+                    .affected(affected)
+                    .description(description.to_string());
+                if let Some(condition) = suffix_condition {
+                    def.condition = Some(condition);
+                }
+                return Some(def);
             }
         }
-        return Some(
-            StaticDefinition::new(StaticMode::CantBeBlocked)
-                .affected(affected)
-                .description(description.to_string()),
-        );
+        let mut def = StaticDefinition::new(StaticMode::CantBeBlocked)
+            .affected(affected)
+            .description(description.to_string());
+        if let Some(condition) = suffix_condition {
+            def.condition = Some(condition);
+        }
+        return Some(def);
     }
 
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
     // Handles both "gets +1/+1 as long as ..." and "has flying as long as ..."
-    let pred_tp = TextPair::new(predicate, &pred_lower);
     if let Some((before_cond, after_cond)) = pred_tp.split_around(" as long as ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         if let Some(mut def) =
             parse_continuous_gets_has(continuous_text, affected.clone(), description)
         {
-            let condition =
-                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+            let condition = parse_attached_static_condition(condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
                     text: condition_text.to_string(),
-                });
+                },
+            );
             def.condition = Some(condition);
             return Some(def);
         }
@@ -14045,6 +14171,86 @@ mod tests {
                 .unwrap();
         assert_eq!(def.mode, StaticMode::CantBeBlocked);
         assert_eq!(def.condition, Some(StaticCondition::SourceAttackingAlone));
+    }
+
+    #[test]
+    fn enchanted_creature_cant_be_blocked_as_long_as_you_control_gate() {
+        let def =
+            parse_static_line("Enchanted creature can't be blocked as long as you control a Gate.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeBlocked);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::EnchantedBy)
+        ));
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::IsPresent { filter: Some(TargetFilter::Typed(tf)) })
+                if tf.get_subtype() == Some("Gate")
+        ));
+    }
+
+    #[test]
+    fn equipped_creature_cant_be_blocked_condition_uses_recipient_power() {
+        let def = parse_static_line(
+            "Equipped creature can't be blocked as long as its power is 3 or less.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeBlocked);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::EquippedBy)
+        ));
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            })
+        ));
+    }
+
+    #[test]
+    fn equipped_creature_continuous_condition_uses_recipient_power() {
+        let def =
+            parse_static_line("Equipped creature gets +1/+1 as long as its power is 3 or less.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            })
+        ));
+    }
+
+    #[test]
+    fn equipped_creature_counter_condition_uses_recipient_counter_scope() {
+        let def =
+            parse_static_line("Equipped creature gets +1/+1 as long as it has a counter on it.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::RecipientHasCounters {
+                counters: CounterMatch::Any,
+                minimum: 1,
+                maximum: None,
+            })
+        ));
     }
 
     #[test]

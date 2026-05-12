@@ -3032,6 +3032,17 @@ pub enum StaticCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
     },
+    /// CR 122.1 + CR 613.4c: True when the object currently receiving an
+    /// attached-object static has at least `minimum` (and at most `maximum`, if
+    /// specified) counters matching `counters`. Used for Aura/Equipment
+    /// conditions where "it" refers to the enchanted/equipped creature rather
+    /// than the attachment source.
+    RecipientHasCounters {
+        counters: CounterMatch,
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        maximum: Option<u32>,
+    },
     /// CR 716.2a: True when the source Class enchantment is at or above the given level.
     /// Class level is a dedicated field (not a counter), so proliferate does not interact.
     ClassLevelGE {

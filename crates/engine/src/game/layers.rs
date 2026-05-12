@@ -5,6 +5,7 @@ use crate::game::arithmetic::saturating_pt_add;
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
+use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
@@ -27,6 +28,7 @@ struct ActiveCombatAssignmentRuleEffect {
     timestamp: u64,
     modification: ContinuousModification,
     affected_filter: TargetFilter,
+    condition: Option<StaticCondition>,
 }
 
 /// Remove transient effects that have expired based on their duration.
@@ -230,6 +232,66 @@ pub(crate) fn evaluate_condition(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    evaluate_condition_with_context(state, condition, controller, source_id, None)
+}
+
+pub(crate) fn evaluate_condition_with_recipient(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    recipient_id: ObjectId,
+) -> bool {
+    evaluate_condition_with_context(state, condition, controller, source_id, Some(recipient_id))
+}
+
+fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        }
+        | StaticCondition::DefendingPlayerControls { filter }
+        | StaticCondition::SourceMatchesFilter { filter } => filter_uses_recipient(filter),
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_uses_recipient(lhs) || quantity_expr_uses_recipient(rhs)
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(condition_uses_recipient_context)
+        }
+        StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
+        StaticCondition::RecipientHasCounters { .. } => true,
+        _ => false,
+    }
+}
+
+fn source_condition_gate_passes(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if !condition_uses_recipient_context(condition) {
+        return evaluate_condition(state, condition, controller, source_id);
+    }
+
+    match condition {
+        StaticCondition::And { conditions } => conditions
+            .iter()
+            .all(|condition| source_condition_gate_passes(state, condition, controller, source_id)),
+        StaticCondition::Not { condition } if !condition_uses_recipient_context(condition) => {
+            !evaluate_condition(state, condition, controller, source_id)
+        }
+        _ => true,
+    }
+}
+
+fn evaluate_condition_with_context(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    recipient_id: Option<ObjectId>,
+) -> bool {
     match condition {
         StaticCondition::DevotionGE { colors, threshold } => {
             count_devotion(state, controller, colors) >= *threshold
@@ -255,20 +317,30 @@ pub(crate) fn evaluate_condition(
             rhs,
         } => {
             let resolve = |expr: &QuantityExpr| -> i32 {
-                crate::game::quantity::resolve_quantity(state, expr, controller, source_id)
+                crate::game::quantity::resolve_quantity_with_ctx(
+                    state,
+                    expr,
+                    controller,
+                    QuantityContext {
+                        entering: None,
+                        source: source_id,
+                        recipient: recipient_id,
+                        scoped_player: None,
+                    },
+                )
             };
             comparator.evaluate(resolve(lhs), resolve(rhs))
         }
         StaticCondition::HasMaxSpeed => has_max_speed(state, controller),
         StaticCondition::SpeedGE { threshold } => effective_speed(state, controller) >= *threshold,
-        StaticCondition::And { conditions } => conditions
-            .iter()
-            .all(|c| evaluate_condition(state, c, controller, source_id)),
-        StaticCondition::Or { conditions } => conditions
-            .iter()
-            .any(|c| evaluate_condition(state, c, controller, source_id)),
+        StaticCondition::And { conditions } => conditions.iter().all(|c| {
+            evaluate_condition_with_context(state, c, controller, source_id, recipient_id)
+        }),
+        StaticCondition::Or { conditions } => conditions.iter().any(|c| {
+            evaluate_condition_with_context(state, c, controller, source_id, recipient_id)
+        }),
         StaticCondition::Not { condition } => {
-            !evaluate_condition(state, condition, controller, source_id)
+            !evaluate_condition_with_context(state, condition, controller, source_id, recipient_id)
         }
         // CR 731.1: True when the game has the requested day/night designation.
         StaticCondition::DayNightIs {
@@ -287,13 +359,15 @@ pub(crate) fn evaluate_condition(
         } => state
             .objects
             .get(&source_id)
-            .map(|obj| {
-                let count: u32 = match counters {
-                    CounterMatch::Any => obj.counters.values().sum(),
-                    CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
-                };
-                count >= *minimum && maximum.is_none_or(|max| count <= max)
-            })
+            .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
+            .unwrap_or(false),
+        StaticCondition::RecipientHasCounters {
+            counters,
+            minimum,
+            maximum,
+        } => recipient_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
             .unwrap_or(false),
         // CR 716.3: Level abilities are active at or above the specified level.
         StaticCondition::ClassLevelGE { level } => state
@@ -462,6 +536,19 @@ pub(crate) fn evaluate_condition(
                 .is_some_and(|obj| obj.controller == controller && obj.is_commander)
         }),
     }
+}
+
+fn counter_condition_matches(
+    obj: &crate::game::game_object::GameObject,
+    counters: &CounterMatch,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> bool {
+    let count: u32 = match counters {
+        CounterMatch::Any => obj.counters.values().sum(),
+        CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
+    };
+    count >= minimum && maximum.is_none_or(|max| count <= max)
 }
 
 /// Test-only wrapper to expose `evaluate_condition` for unit tests in other modules.
@@ -851,11 +938,14 @@ fn active_continuous_effects_from_static_definitions(
             }
         }
 
-        if let Some(ref condition) = def.condition {
-            if !evaluate_condition(state, condition, controller, source_id) {
+        let retained_condition = if let Some(condition) = &def.condition {
+            if !source_condition_gate_passes(state, condition, controller, source_id) {
                 continue;
             }
-        }
+            condition_uses_recipient_context(condition).then(|| condition.clone())
+        } else {
+            None
+        };
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         for modification in &def.modifications {
@@ -870,6 +960,7 @@ fn active_continuous_effects_from_static_definitions(
                 timestamp,
                 modification: modification.clone(),
                 affected_filter: affected_filter.clone(),
+                condition: retained_condition.clone(),
                 mode: def.mode.clone(),
                 characteristic_defining: def.characteristic_defining,
             });
@@ -902,12 +993,14 @@ pub(crate) fn gather_transient_continuous_effects(
             }
         }
 
-        // Evaluate condition using the shared evaluator
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+        let retained_condition = if let Some(condition) = &tce.condition {
+            if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
                 continue;
             }
-        }
+            condition_uses_recipient_context(condition).then(|| condition.clone())
+        } else {
+            None
+        };
 
         for modification in &tce.modifications {
             if is_combat_assignment_rule_modification(modification) {
@@ -921,6 +1014,7 @@ pub(crate) fn gather_transient_continuous_effects(
                 timestamp: tce.timestamp,
                 modification: modification.clone(),
                 affected_filter: tce.affected.clone(),
+                condition: retained_condition.clone(),
                 mode: StaticMode::Continuous,
                 characteristic_defining: false,
             });
@@ -967,6 +1061,17 @@ fn apply_combat_assignment_rule_effects(state: &mut GameState) {
         let affected_ids: Vec<ObjectId> = scan_ids
             .iter()
             .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
+            .filter(|&&id| {
+                effect.condition.as_ref().is_none_or(|condition| {
+                    evaluate_condition_with_recipient(
+                        state,
+                        condition,
+                        effect.controller,
+                        effect.source_id,
+                        id,
+                    )
+                })
+            })
             .copied()
             .collect();
 
@@ -1039,11 +1144,14 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
             }
         }
 
-        if let Some(ref condition) = def.condition {
-            if !evaluate_condition(state, condition, controller, source_id) {
+        let retained_condition = if let Some(condition) = &def.condition {
+            if !source_condition_gate_passes(state, condition, controller, source_id) {
                 continue;
             }
-        }
+            condition_uses_recipient_context(condition).then(|| condition.clone())
+        } else {
+            None
+        };
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         effects.extend(
@@ -1056,6 +1164,7 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
                     timestamp,
                     modification: modification.clone(),
                     affected_filter: affected_filter.clone(),
+                    condition: retained_condition.clone(),
                 }),
         );
     }
@@ -1083,11 +1192,14 @@ fn collect_transient_combat_assignment_rule_effects(
             }
         }
 
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+        let retained_condition = if let Some(condition) = &tce.condition {
+            if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
                 continue;
             }
-        }
+            condition_uses_recipient_context(condition).then(|| condition.clone())
+        } else {
+            None
+        };
 
         effects.extend(
             tce.modifications
@@ -1099,6 +1211,7 @@ fn collect_transient_combat_assignment_rule_effects(
                     timestamp: tce.timestamp,
                     modification: modification.clone(),
                     affected_filter: tce.affected.clone(),
+                    condition: retained_condition.clone(),
                 }),
         );
     }
@@ -1368,6 +1481,17 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     let affected_ids: Vec<ObjectId> = scan_ids
         .iter()
         .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
+        .filter(|&&id| {
+            effect.condition.as_ref().is_none_or(|condition| {
+                evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    effect.controller,
+                    effect.source_id,
+                    id,
+                )
+            })
+        })
         .copied()
         .collect();
 
@@ -1896,6 +2020,17 @@ pub(crate) fn compute_current_copiable_values(
                     &effect.affected_filter,
                     &FilterContext::from_source(state, effect.source_id),
                 )
+            })
+            .filter(|effect| {
+                effect.condition.as_ref().is_none_or(|condition| {
+                    evaluate_condition_with_recipient(
+                        state,
+                        condition,
+                        effect.controller,
+                        effect.source_id,
+                        object_id,
+                    )
+                })
             })
             .collect();
     copy_effects = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
@@ -2996,6 +3131,61 @@ mod tests {
             "expected 2 base + 3 words in recipient name, not 1 word in source name"
         );
         assert_eq!(final_bear.toughness, Some(5));
+    }
+
+    /// CR 613.4c: Attached continuous-effect conditions that use recipient
+    /// quantities must be evaluated per affected object after that object is known.
+    #[test]
+    fn attached_continuous_condition_reads_recipient_power() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Small Rogue", 3, 3, PlayerId(0));
+
+        let equipment = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Power Gated Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+                    .condition(StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Recipient,
+                            },
+                        },
+                        comparator: crate::types::ability::Comparator::LE,
+                        rhs: QuantityExpr::Fixed { value: 3 },
+                    }),
+            );
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(equipment);
+
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects.get(&bear).unwrap().power, Some(4));
+
+        let bear_obj = state.objects.get_mut(&bear).unwrap();
+        bear_obj.base_power = Some(4);
+        bear_obj.power = Some(4);
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects.get(&bear).unwrap().power, Some(4));
     }
 
     /// CR 107.4 + CR 202.1 + CR 613.4c: Light from Within-style statics count

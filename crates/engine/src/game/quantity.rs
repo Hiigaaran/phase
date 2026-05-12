@@ -159,6 +159,15 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ObjectNameWordCount {
                 scope: ObjectScope::Recipient,
             }
+            | QuantityRef::Power {
+                scope: ObjectScope::Recipient,
+            }
+            | QuantityRef::Toughness {
+                scope: ObjectScope::Recipient,
+            }
+            | QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            }
             | QuantityRef::ManaSymbolsInManaCost {
                 scope: ObjectScope::Recipient,
                 ..
@@ -183,7 +192,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
     }
 }
 
-fn filter_uses_recipient(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_uses_recipient(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => tf.properties.iter().any(filter_prop_uses_recipient),
         TargetFilter::Not { filter: inner } => filter_uses_recipient(inner),

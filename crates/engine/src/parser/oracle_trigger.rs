@@ -1495,6 +1495,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::DevotionGE { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::SpeedGE { .. }
+        | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone

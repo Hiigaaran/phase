@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::functioning_abilities::{active_static_definitions, battlefield_active_statics};
-use crate::game::layers::evaluate_condition;
+use crate::game::functioning_abilities::{battlefield_active_statics, game_functioning_statics};
+use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -491,29 +491,24 @@ pub fn check_static_ability(
 ) -> bool {
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
-    // gate (phased-out + command-zone + condition) is owned by
-    // `active_static_definitions`.
-    let zones = state.battlefield.iter().chain(state.command_zone.iter());
-    for &id in zones {
-        let obj = match state.objects.get(&id) {
-            Some(o) => o,
-            None => continue,
-        };
+    // gate is applied before context-specific condition evaluation below.
+    for (obj, def) in game_functioning_statics(state) {
+        if def.mode != mode {
+            continue;
+        }
 
-        for def in active_static_definitions(state, obj) {
-            if def.mode != mode {
+        // Check affected filter if present (typed TargetFilter)
+        if let Some(ref affected) = def.affected {
+            if !static_filter_matches(state, context, affected, obj.id) {
                 continue;
             }
-
-            // Check affected filter if present (typed TargetFilter)
-            if let Some(ref affected) = def.affected {
-                if !static_filter_matches(state, context, affected, id) {
-                    continue;
-                }
-            }
-
-            return true;
         }
+
+        if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
+            continue;
+        }
+
+        return true;
     }
 
     false
@@ -694,27 +689,45 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
 /// allocate in potentially hot paths (damage resolution, sacrifice loops).
 fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticCheckContext) -> bool {
     // CR 114.4: Abilities of emblems function in the command zone.
-    // Functioning gate owned by `active_static_definitions`.
-    let zones = state.battlefield.iter().chain(state.command_zone.iter());
-    for &id in zones {
-        let obj = match state.objects.get(&id) {
-            Some(o) => o,
-            None => continue,
-        };
-        for def in active_static_definitions(state, obj) {
-            match &def.mode {
-                StaticMode::Other(s) if s == name => {}
-                _ => continue,
-            }
-            if let Some(ref affected) = def.affected {
-                if !static_filter_matches(state, context, affected, id) {
-                    continue;
-                }
-            }
-            return true;
+    // Functioning gate is applied before context-specific condition evaluation.
+    for (source_obj, def) in game_functioning_statics(state) {
+        match &def.mode {
+            StaticMode::Other(s) if s == name => {}
+            _ => continue,
         }
+        if let Some(ref affected) = def.affected {
+            if !static_filter_matches(state, context, affected, source_obj.id) {
+                continue;
+            }
+        }
+        if !static_condition_matches_context(
+            state,
+            source_obj.id,
+            source_obj.controller,
+            def,
+            context,
+        ) {
+            continue;
+        }
+        return true;
     }
     false
+}
+
+fn static_condition_matches_context(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    def: &crate::types::ability::StaticDefinition,
+    context: &StaticCheckContext,
+) -> bool {
+    def.condition.as_ref().is_none_or(|condition| {
+        if let Some(recipient_id) = context.target_id {
+            evaluate_condition_with_recipient(state, condition, controller, source_id, recipient_id)
+        } else {
+            evaluate_condition(state, condition, controller, source_id)
+        }
+    })
 }
 
 /// Check if a static ability named `name` applies to a specific object
