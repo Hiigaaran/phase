@@ -2862,8 +2862,7 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaColor;
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::statics::CastFrequency;
@@ -7299,6 +7298,87 @@ mod tests {
              IfYouDo sub-ability likely did not fire.",
             hand_after,
         );
+    }
+
+    #[test]
+    fn optional_resolution_pay_ability_cost_if_you_do_draws_after_composite_payment() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Library,
+        );
+        state.players[0].life = 20;
+        state.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(200),
+                false,
+                Vec::new(),
+            ));
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IfYouDo);
+        let mut ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::PaymentCost::AbilityCost {
+                    cost: crate::types::ability::AbilityCost::Composite {
+                        costs: vec![
+                            crate::types::ability::AbilityCost::Mana {
+                                cost: ManaCost::generic(1),
+                            },
+                            crate::types::ability::AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                        ],
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+        .sub_ability(draw);
+        ability.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert_eq!(state.players[0].life, 19);
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[0].library.len(), 0);
     }
 
     /// Abandon Attachments #81: stale cost_payment_failed_flag from a previous resolution

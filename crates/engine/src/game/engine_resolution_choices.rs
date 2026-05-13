@@ -310,7 +310,9 @@ pub(super) fn handle_resolution_choice(
                         shards: vec![],
                         generic: amount.saturating_mul(per_x),
                     };
-                    if !casting::can_pay_cost_after_auto_tap(state, player, source_id, &cost) {
+                    if !casting::can_pay_effect_mana_cost_after_auto_tap(
+                        state, player, source_id, &cost,
+                    ) {
                         return Err(EngineError::InvalidAction(format!(
                             "Player {:?} cannot pay {} generic mana",
                             player,

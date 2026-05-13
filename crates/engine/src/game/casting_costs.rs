@@ -2585,13 +2585,19 @@ fn count_available_sources(
     used: &HashSet<ObjectId>,
     acceptable: &[ManaType],
     requires_two_or_more_color_source: bool,
+    payment_context: Option<&PaymentContext<'_>>,
 ) -> usize {
     let mut seen = HashSet::new();
     for opt in available {
         // CR 605.3b: Filter-land combination rows contribute multi-mana
         // atomically. Any color in their combination satisfies the shard.
         if !used.contains(&opt.object_id)
-            && option_satisfies(opt, acceptable, requires_two_or_more_color_source)
+            && option_satisfies(
+                opt,
+                acceptable,
+                requires_two_or_more_color_source,
+                payment_context,
+            )
         {
             seen.insert(opt.object_id);
         }
@@ -2606,7 +2612,11 @@ fn option_satisfies(
     opt: &ManaSourceOption,
     acceptable: &[ManaType],
     requires_two_or_more_color_source: bool,
+    payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
+    if !option_allowed_for_context(opt, payment_context) {
+        return false;
+    }
     if requires_two_or_more_color_source && !opt.source_could_produce_two_or_more_colors {
         return false;
     }
@@ -2619,6 +2629,18 @@ fn option_satisfies(
     }
 }
 
+fn option_allowed_for_context(
+    opt: &ManaSourceOption,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> bool {
+    let Some(ctx) = payment_context else {
+        return true;
+    };
+    opt.restrictions
+        .iter()
+        .all(|restriction| restriction.allows(ctx))
+}
+
 /// Pick the source with the fewest alternative color options (LCV heuristic).
 /// Among ties, the tier-sort order of `available` acts as tiebreaker (pure lands
 /// before dorks before land-creatures before sacrifice sources).
@@ -2627,12 +2649,18 @@ fn find_least_flexible_source(
     used: &HashSet<ObjectId>,
     acceptable: &[ManaType],
     requires_two_or_more_color_source: bool,
+    payment_context: Option<&PaymentContext<'_>>,
 ) -> Option<ManaSourceOption> {
     available
         .iter()
         .filter(|opt| {
             !used.contains(&opt.object_id)
-                && option_satisfies(opt, acceptable, requires_two_or_more_color_source)
+                && option_satisfies(
+                    opt,
+                    acceptable,
+                    requires_two_or_more_color_source,
+                    payment_context,
+                )
         })
         .min_by_key(|opt| {
             available
@@ -2687,6 +2715,46 @@ pub(super) fn auto_tap_mana_sources_excluding(
         events,
         deprioritize_source,
         excluded_sources,
+        None,
+    );
+}
+
+pub(super) fn auto_tap_mana_sources_with_context(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    deprioritize_source: Option<ObjectId>,
+    payment_context: Option<&PaymentContext<'_>>,
+) {
+    auto_tap_mana_sources_with_context_excluding(
+        state,
+        player,
+        cost,
+        events,
+        deprioritize_source,
+        payment_context,
+        &HashSet::new(),
+    );
+}
+
+pub(super) fn auto_tap_mana_sources_with_context_excluding(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    deprioritize_source: Option<ObjectId>,
+    payment_context: Option<&PaymentContext<'_>>,
+    excluded_sources: &HashSet<ObjectId>,
+) {
+    auto_tap_mana_sources_inner(
+        state,
+        player,
+        cost,
+        events,
+        deprioritize_source,
+        excluded_sources,
+        payment_context,
     );
 }
 
@@ -2697,6 +2765,7 @@ fn auto_tap_mana_sources_inner(
     events: &mut Vec<GameEvent>,
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
+    payment_context: Option<&PaymentContext<'_>>,
 ) {
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaCost;
@@ -2709,19 +2778,25 @@ fn auto_tap_mana_sources_inner(
     // `reduce_cost_by_pool`, which mirrors the real payment path.
     let spell_meta =
         deprioritize_source.and_then(|sid| super::casting::build_spell_meta(state, player, sid));
-    let any_color = super::casting::player_can_spend_as_any_color_for_optional_spell(
-        state,
-        player,
-        deprioritize_source,
-    );
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let effective_ctx = payment_context.or(spell_ctx.as_ref());
+    let any_color = if matches!(
+        payment_context,
+        Some(PaymentContext::Effect | PaymentContext::Activation { .. })
+    ) {
+        super::static_abilities::player_can_spend_as_any_color(state, player)
+    } else {
+        super::casting::player_can_spend_as_any_color_for_optional_spell(
+            state,
+            player,
+            deprioritize_source,
+        )
+    };
     let residual = state
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| {
-            mana_payment::reduce_cost_by_pool(&p.mana_pool, cost, spell_ctx.as_ref(), any_color)
-        })
+        .map(|p| mana_payment::reduce_cost_by_pool(&p.mana_pool, cost, effective_ctx, any_color))
         .unwrap_or_else(|| cost.clone());
 
     let (shards, generic) = match &residual {
@@ -2801,16 +2876,24 @@ fn auto_tap_mana_sources_inner(
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
             ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
-                needs.push((vec![color], false, false));
+                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                needs.push((acceptable, false, false));
             }
             ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
-                needs.push((vec![a, b], false, false));
+                let acceptable = if any_color { Vec::new() } else { vec![a, b] };
+                needs.push((acceptable, false, false));
             }
             ShardRequirement::TwoGenericHybrid(color) => {
-                needs.push((vec![color], true, false));
+                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                needs.push((acceptable, true, false));
             }
             ShardRequirement::ColorlessHybrid(color) => {
-                needs.push((vec![ManaType::Colorless, color], false, false));
+                let acceptable = if any_color {
+                    Vec::new()
+                } else {
+                    vec![ManaType::Colorless, color]
+                };
+                needs.push((acceptable, false, false));
             }
             ShardRequirement::TwoOrMoreColorSource => {
                 needs.push((Vec::new(), false, true));
@@ -2834,6 +2917,7 @@ fn auto_tap_mana_sources_inner(
         &mut assigned,
         &mut used_sources,
         &mut to_tap,
+        effective_ctx,
     );
 
     // Phase 1: Assign remaining single-color sources to shards using MCV/LCV.
@@ -2856,6 +2940,7 @@ fn auto_tap_mana_sources_inner(
                 &used_sources,
                 acceptable,
                 *requires_two_or_more_color_source,
+                effective_ctx,
             );
             if count < min_sources {
                 min_sources = count;
@@ -2869,6 +2954,7 @@ fn auto_tap_mana_sources_inner(
             &used_sources,
             acceptable,
             requires_two_or_more_color_source,
+            effective_ctx,
         ) {
             used_sources.insert(option.object_id);
             to_tap.push(option);
@@ -2887,6 +2973,9 @@ fn auto_tap_mana_sources_inner(
             break;
         }
         if option.atomic_combination.is_some() {
+            continue;
+        }
+        if !option_allowed_for_context(option, effective_ctx) {
             continue;
         }
         if used_sources.insert(option.object_id) {
@@ -2910,6 +2999,12 @@ fn auto_tap_mana_sources_inner(
                 if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
                     let mut excluded = excluded_sources.clone();
                     excluded.insert(option.object_id);
+                    let (source_types, source_subtypes) =
+                        super::casting::activation_source_types(state, option.object_id);
+                    let activation_ctx = PaymentContext::Activation {
+                        source_types: &source_types,
+                        source_subtypes: &source_subtypes,
+                    };
                     auto_tap_mana_sources_inner(
                         state,
                         player,
@@ -2917,6 +3012,7 @@ fn auto_tap_mana_sources_inner(
                         events,
                         Some(option.object_id),
                         &excluded,
+                        Some(&activation_ctx),
                     );
                 }
                 // color_override tells resolve_mana_ability how to resolve the
@@ -3020,6 +3116,7 @@ fn assign_combination_sources(
     assigned: &mut [bool],
     used_sources: &mut HashSet<ObjectId>,
     to_tap: &mut Vec<ManaSourceOption>,
+    payment_context: Option<&PaymentContext<'_>>,
 ) {
     // Build per-object candidate list: for each object that has any
     // `atomic_combination`-bearing rows, collect all of its combination rows.
@@ -3028,6 +3125,7 @@ fn assign_combination_sources(
         if opt.atomic_combination.is_some()
             && !combo_objects.contains(&opt.object_id)
             && !used_sources.contains(&opt.object_id)
+            && option_allowed_for_context(opt, payment_context)
         {
             combo_objects.push(opt.object_id);
         }
@@ -3040,7 +3138,11 @@ fn assign_combination_sources(
         // Collect this object's combination rows in tier order.
         let candidates: Vec<&ManaSourceOption> = available
             .iter()
-            .filter(|o| o.object_id == oid && o.atomic_combination.is_some())
+            .filter(|o| {
+                o.object_id == oid
+                    && o.atomic_combination.is_some()
+                    && option_allowed_for_context(o, payment_context)
+            })
             .collect();
         if candidates.is_empty() {
             continue;

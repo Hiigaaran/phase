@@ -2763,12 +2763,12 @@ pub mod tests {
     use crate::game::filter::{matches_target_filter, FilterContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, AggregateFunction, ChosenAttribute, ChosenSubtypeKind,
-        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
-        Effect, FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, PlayerScope,
-        QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-        TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+        ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, KickerVariant,
+        MultiTargetSpec, PaymentCost, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -2779,7 +2779,7 @@ pub mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::{Keyword, KeywordKind};
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::triggers::AttackTargetFilter;
@@ -2945,6 +2945,99 @@ pub mod tests {
                 .expect("pass priority");
         }
         panic!("stack did not resolve");
+    }
+
+    #[test]
+    fn dies_trigger_optional_composite_ability_cost_pays_and_draws_through_stack() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(200),
+            false,
+            Vec::new(),
+        ));
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Library,
+        );
+
+        let source = make_creature(&mut state, PlayerId(0), "Miara Stand-In", 1, 2);
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let dying_elf = make_creature(&mut state, PlayerId(0), "Dying Elf", 1, 1);
+        {
+            let obj = state.objects.get_mut(&dying_elf).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .condition(AbilityCondition::IfYouDo);
+        let pay_then_draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::generic(1),
+                            },
+                            AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                        ],
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(draw)
+        .optional();
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(pay_then_draw)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Subtype("Elf".to_string()))
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ))
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, dying_elf, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 1);
+
+        resolve_stack_to_optional_choice(&mut state);
+        accept_optional_effect(&mut state);
+
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert_eq!(state.players[0].life, 19);
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[0].library.len(), 0);
     }
 
     #[test]

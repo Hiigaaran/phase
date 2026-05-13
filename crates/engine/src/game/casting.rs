@@ -4212,12 +4212,13 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
-    super::casting_costs::auto_tap_mana_sources_excluding(
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
         &mut simulated,
         player,
         cost,
         &mut tap_events,
         Some(source_id),
+        ctx,
         excluded_sources,
     );
 
@@ -4314,6 +4315,53 @@ pub(super) fn can_pay_ability_mana_cost_after_auto_tap_excluding(
         Some(&activation_ctx),
         excluded_sources,
     )
+}
+
+/// Returns true if the player can pay a resolution-time mana cost after
+/// auto-tapping mana sources. This is distinct from spell-casting and
+/// activated-ability payments: CR 106.6 restrictions that name those categories
+/// must not become eligible for a generic "you may pay" effect during
+/// resolution.
+pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+
+    let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
+    let effect_ctx = PaymentContext::Effect;
+    super::casting_costs::auto_tap_mana_sources_with_context(
+        &mut simulated,
+        player,
+        cost,
+        &mut tap_events,
+        Some(source_id),
+        Some(&effect_ctx),
+    );
+    if !tap_events.is_empty() {
+        super::triggers::process_triggers(&mut simulated, &tap_events);
+    }
+
+    let any_color = player_can_spend_as_any_color_for_optional_spell(&simulated, player, None);
+    let max_life = super::life_costs::max_phyrexian_life_payments(&simulated, player);
+    simulated
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|player_data| {
+            mana_payment::can_pay_for_spell(
+                &player_data.mana_pool,
+                cost,
+                Some(&effect_ctx),
+                any_color,
+                max_life,
+            )
+        })
 }
 
 // Target/mode selection handlers are in casting_targets module.
@@ -4470,6 +4518,83 @@ pub(super) fn pay_ability_mana_cost_excluding(
     Ok(())
 }
 
+/// Pay a mana cost during effect resolution. Resolution-time "you may pay"
+/// effects are neither spell casts nor activated-ability activations, so
+/// restricted mana is checked through `PaymentContext::Effect`.
+pub(super) fn pay_effect_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if state.layers_dirty {
+        super::layers::evaluate_layers(state);
+    }
+
+    let effect_ctx = PaymentContext::Effect;
+    super::casting_costs::auto_tap_mana_sources_with_context(
+        state,
+        player,
+        cost,
+        events,
+        Some(source_id),
+        Some(&effect_ctx),
+    );
+
+    {
+        let player_data = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
+        let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
+        if !mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            Some(&effect_ctx),
+            any_color,
+            max_life,
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay mana cost".to_string(),
+            ));
+        }
+    }
+
+    let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
+    let player_data = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists");
+    let (_spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
+        &mut player_data.mana_pool,
+        cost,
+        None,
+        Some(&effect_ctx),
+        any_color,
+        None,
+    )
+    .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+
+    for payment in &life_payments {
+        let amount = u32::try_from(payment.amount).unwrap_or(0);
+        match super::life_costs::pay_life_as_cost(state, player, amount, events) {
+            super::life_costs::PayLifeCostResult::Paid { .. } => {}
+            super::life_costs::PayLifeCostResult::InsufficientLife
+            | super::life_costs::PayLifeCostResult::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay Phyrexian life cost".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Shared mana-payment core: auto-taps sources, validates affordability,
 /// executes the spend with the given payment context, and processes any
 /// Phyrexian life payments. Returns the spent units so spell-specific callers
@@ -4506,12 +4631,13 @@ fn auto_tap_and_pay_cost_excluding(
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
-    super::casting_costs::auto_tap_mana_sources_excluding(
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
         state,
         player,
         cost,
         events,
         Some(source_id),
+        ctx,
         excluded_sources,
     );
 
@@ -4982,16 +5108,16 @@ pub fn pay_ability_cost(
     Ok(())
 }
 
-/// CR 118.12: Pay an "unless pays" cost. Auto-taps lands and deducts mana.
-/// Used when the opponent chooses to pay a counter-unless cost (e.g., Mana Leak).
+/// CR 118.12: Pay an "unless pays" or other non-spell/non-activation mana
+/// cost. These payments happen outside spell casting and ability activation,
+/// so CR 106.6 restricted mana must be checked through `PaymentContext::Effect`.
 pub fn pay_unless_cost(
     state: &mut GameState,
     player: PlayerId,
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    // Use ObjectId(0) as a dummy source since there's no specific object paying
-    pay_mana_cost(state, player, ObjectId(0), cost, events)
+    pay_effect_mana_cost(state, player, ObjectId(0), cost, events)
 }
 
 /// Walk a cost tree and return the waterbend mana cost if present.
@@ -6333,10 +6459,10 @@ mod tests {
         ActivationRestriction, BasicLandType, CastPermissionConstraint, CastVariantPaid,
         CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
         ControllerRef, CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant,
-        ManaContribution, ManaProduction, ManaSpendPermission, ModalSelectionCondition,
-        ModalSelectionConstraint, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction,
+        ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -6373,6 +6499,124 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    fn add_activation_only_colorless_source(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![ManaSpendRestriction::ActivateOnly],
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        source
+    }
+
+    #[test]
+    fn activation_mana_payment_auto_taps_activation_only_source() {
+        let mut state = setup_game_at_main_phase();
+        let restricted_source =
+            add_activation_only_colorless_source(&mut state, CardId(10), "Activation Battery");
+        let ability_source = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let cost = ManaCost::generic(1);
+
+        assert!(can_pay_ability_mana_cost_after_auto_tap(
+            &state,
+            PlayerId(0),
+            ability_source,
+            &cost
+        ));
+
+        let mut events = Vec::new();
+        pay_ability_mana_cost(&mut state, PlayerId(0), ability_source, &cost, &mut events).unwrap();
+
+        assert!(state.objects.get(&restricted_source).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    }
+
+    #[test]
+    fn unless_mana_payment_rejects_activation_only_source() {
+        let mut state = setup_game_at_main_phase();
+        let restricted_source =
+            add_activation_only_colorless_source(&mut state, CardId(10), "Activation Battery");
+        let cost = ManaCost::generic(1);
+        let mut events = Vec::new();
+
+        assert!(pay_unless_cost(&mut state, PlayerId(0), &cost, &mut events).is_err());
+
+        assert!(!state.objects.get(&restricted_source).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    }
+
+    #[test]
+    fn spell_auto_tap_honors_exile_any_color_permission() {
+        let mut state = setup_game_at_main_phase();
+        let mountain = add_basic_land(&mut state, CardId(10), "Mountain", "Mountain");
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Borrowed Blue Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+            obj.casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                });
+        }
+        let cost = state.objects[&spell].mana_cost.clone();
+
+        assert!(can_pay_cost_after_auto_tap(
+            &state,
+            PlayerId(0),
+            spell,
+            &cost
+        ));
+
+        let mut events = Vec::new();
+        pay_mana_cost(&mut state, PlayerId(0), spell, &cost, &mut events).unwrap();
+
+        assert!(state.objects.get(&mountain).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
     }
 
     fn foretell_test_cost() -> ManaCost {

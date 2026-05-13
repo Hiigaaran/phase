@@ -97,13 +97,15 @@ pub struct SpellMeta {
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
-/// spell being cast" from "paying for an ability being activated" so the
-/// restriction check can route through `allows_spell` vs `allows_activation`.
+/// spell being cast", "paying for an ability being activated", and paying
+/// costs during effect resolution so the restriction check can route through
+/// the correct rules category.
 ///
 /// Casting-restricted mana (e.g., "creature-spell-only") must reject ability
 /// activations; activation-restricted mana (e.g., "activate abilities only")
-/// must reject spell casts. Using the correct variant per payment site is the
-/// single authority that enforces this bifurcation.
+/// must reject spell casts and resolution-time effect costs. Using the correct
+/// variant per payment site is the single authority that enforces this
+/// bifurcation.
 #[derive(Debug, Clone, Copy)]
 pub enum PaymentContext<'a> {
     /// Payment for a spell being cast — consult `allows_spell`.
@@ -114,6 +116,10 @@ pub enum PaymentContext<'a> {
         source_types: &'a [String],
         source_subtypes: &'a [String],
     },
+    /// Payment for a cost during spell or ability resolution. Current
+    /// restriction variants name spell-casting or ability-activation use, so
+    /// restricted mana is not eligible here.
+    Effect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +245,7 @@ impl ManaRestriction {
                 source_types,
                 source_subtypes,
             } => self.allows_activation(source_types, source_subtypes),
+            PaymentContext::Effect => false,
         }
     }
 }
