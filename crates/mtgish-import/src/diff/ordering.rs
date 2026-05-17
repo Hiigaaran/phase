@@ -264,6 +264,10 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("Effect", "additional_modifications"),
         OrderingClass::SetEquivalent,
     ),
+    // `ChooseFromZone.additional_zones` unions extra search zones with the
+    // primary `zone` (e.g. "choose a card from your hand or graveyard").
+    // The choosable pool is a zone union — order is incidental. Set.
+    (("Effect", "additional_zones"), OrderingClass::SetEquivalent),
     (("Effect", "branches"), OrderingClass::OrderSignificant),
     (("Effect", "cards"), OrderingClass::SetEquivalent),
     (("Effect", "categories"), OrderingClass::SetEquivalent),
