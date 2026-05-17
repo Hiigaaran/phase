@@ -1555,6 +1555,11 @@ pub enum WaitingFor {
     OptionalCostChoice {
         player: PlayerId,
         cost: AdditionalCost,
+        /// CR 702.33c/d: How many times this spell has already been kicked. Lets the
+        /// frontend present a kick-count-aware modal for repeatable multikicker re-prompts.
+        /// Zero for the first prompt and for non-kicker optional costs.
+        #[serde(default)]
+        times_kicked: u32,
         pending_cast: Box<PendingCast>,
     },
     /// CR 601.2b: Defiler cycle — player may pay life to reduce mana cost of a colored
@@ -4538,6 +4543,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::OptionalCostChoice {
             player: PlayerId(0),
             cost: AdditionalCost::Optional(crate::types::ability::AbilityCost::Blight { count: 1 }),
+            times_kicked: 0,
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::AbilityModeChoice {

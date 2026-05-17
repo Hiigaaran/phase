@@ -1262,6 +1262,7 @@ pub(crate) fn deterministic_choice(
         player,
         cost: additional_cost,
         pending_cast,
+        ..
     } = &state.waiting_for
     {
         let pay = match additional_cost {

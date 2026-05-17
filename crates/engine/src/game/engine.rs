@@ -1504,6 +1504,7 @@ fn apply_action(
                 player,
                 cost,
                 pending_cast,
+                ..
             },
             GameAction::DecideOptionalCost { pay },
         ) => engine_casting::handle_optional_cost_choice(
