@@ -11629,9 +11629,14 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             keep_count: None,
             filter: TargetFilter::Any,
             reveal: true,
+            destination,
+            rest_destination,
             ..
         } = &*def.effect
         {
+            if destination == &Some(Zone::Library) && rest_destination == &Some(Zone::Library) {
+                continue;
+            }
             let count_val = match count {
                 QuantityExpr::Fixed { value } => *value as u32,
                 _ => 1,
@@ -22572,6 +22577,91 @@ mod tests {
             "subject-scoped chooser must not be misrouted to the controller, got {:?}",
             sub.effect
         );
+    }
+
+    #[test]
+    fn search_shuffle_put_those_cards_on_top_in_any_order() {
+        let def = parse_effect_chain(
+            "Search your library for up to three creature cards, reveal them, then shuffle and put those cards on top in any order.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::SearchLibrary { reveal: true, .. }
+        ));
+        let shuffle = def
+            .sub_ability
+            .as_ref()
+            .expect("search should chain to shuffle");
+        assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+        let put = shuffle
+            .sub_ability
+            .as_ref()
+            .expect("shuffle should chain to top placement");
+        assert!(matches!(
+            &*put.effect,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            }
+        ));
+    }
+
+    #[test]
+    fn dig_put_those_cards_on_top_in_any_order() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. Put those cards on top in any order.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::Dig {
+                destination: Some(Zone::Library),
+                keep_count: None,
+                rest_destination: Some(Zone::Library),
+                reveal: false,
+                ..
+            }
+        ));
+        let put = def
+            .sub_ability
+            .as_ref()
+            .expect("dig should chain to top placement");
+        assert!(matches!(
+            &*put.effect,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            }
+        ));
+    }
+
+    #[test]
+    fn reveal_dig_put_those_cards_on_top_stays_dig() {
+        let def = parse_effect_chain(
+            "Reveal the top three cards of your library. Put those cards on top in any order.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::Dig {
+                destination: Some(Zone::Library),
+                keep_count: None,
+                rest_destination: Some(Zone::Library),
+                reveal: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            def.sub_ability.as_ref().map(|sub| &*sub.effect),
+            Some(Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            })
+        ));
     }
 
     #[test]

@@ -3,8 +3,8 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
-    Effect, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, PaymentCost, PtValue,
-    QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    Effect, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    PaymentCost, PtValue, QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -236,6 +236,9 @@ pub(crate) enum ContinuationAst {
         chosen_destination: Zone,
         rest_destination: Zone,
     },
+    /// "Put those cards on top ..." after a search/dig/choice producer.
+    /// Count is supplied by the already-selected target set.
+    PutChosenCardsAtLibraryPosition { position: LibraryPosition },
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).

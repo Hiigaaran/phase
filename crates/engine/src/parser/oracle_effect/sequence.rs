@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{eof, opt, value};
+use nom::combinator::{all_consuming, eof, opt, value};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -14,8 +14,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Chooser, CopyRetargetPermission, Effect, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, Chooser, CopyRetargetPermission, Effect, LibraryPosition,
+    QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -79,6 +79,24 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
 fn parse_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
     parse_put_choice_partition_destinations(lower)
         .or_else(|| parse_shuffle_choice_partition_destinations(lower))
+}
+
+fn parse_put_chosen_cards_at_library_position(lower: &str) -> Option<LibraryPosition> {
+    value(
+        LibraryPosition::Top,
+        all_consuming((
+            tag::<_, _, OracleError<'_>>("put those cards on top"),
+            opt(alt((
+                tag(" of your library"),
+                tag(" of their owner's library"),
+            ))),
+            tag(" in any order"),
+            opt(tag(".")),
+        )),
+    )
+    .parse(lower.trim())
+    .map(|(_, position)| position)
+    .ok()
 }
 
 fn parse_put_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
@@ -1421,6 +1439,29 @@ pub(super) fn apply_clause_continuation(
                 previous.sub_ability = Some(Box::new(chosen_def));
             }
         }
+        ContinuationAst::PutChosenCardsAtLibraryPosition { position } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Dig {
+                destination,
+                rest_destination,
+                ..
+            } = &mut *previous.effect
+            {
+                *destination = Some(Zone::Library);
+                *rest_destination = Some(Zone::Library);
+            }
+            let put_def = AbilityDefinition::new(
+                kind,
+                Effect::PutAtLibraryPosition {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 0 },
+                    position,
+                },
+            );
+            append_definition_to_sub_chain(previous, put_def);
+        }
         ContinuationAst::EntersTappedAttacking => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -1603,6 +1644,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchResultClauseHandled => true,
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
+        ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
@@ -1629,6 +1671,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                     || nom_primitives::scan_contains(&full_lower, "put it on top")
                     || nom_primitives::scan_contains(&full_lower, "put the card on top")
                     || nom_primitives::scan_contains(&full_lower, "put them on top")
+                    || nom_primitives::scan_contains(&full_lower, "put those cards on top")
                     || (nom_primitives::scan_contains(&full_lower, "put that card")
                         && nom_primitives::scan_contains(&full_lower, "from the top"));
             if has_positional_put {
@@ -1976,6 +2019,14 @@ pub(super) fn parse_followup_continuation_ast(
                 reorder_all: true,
             })
         }
+        Effect::SearchLibrary { .. } | Effect::Shuffle { .. } | Effect::Dig { .. }
+            if parse_put_chosen_cards_at_library_position(&lower).is_some() =>
+        {
+            Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
+                position: parse_put_chosen_cards_at_library_position(&lower)
+                    .expect("guard parsed position"),
+            })
+        }
         // "Exile the rest" after Dig — sets rest_destination on the preceding
         // looked-at pile while preserving any prior kept-card destination.
         Effect::Dig { .. } if parse_exile_rest_after_dig(&lower) => {
@@ -2116,12 +2167,17 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
-        Effect::ChooseFromZone { .. } => parse_choice_partition_destinations(&lower).map(
-            |(chosen_destination, rest_destination)| ContinuationAst::ChoicePartitionDestinations {
-                chosen_destination,
-                rest_destination,
-            },
-        ),
+        Effect::ChooseFromZone { .. } => parse_choice_partition_destinations(&lower)
+            .map(|(chosen_destination, rest_destination)| {
+                ContinuationAst::ChoicePartitionDestinations {
+                    chosen_destination,
+                    rest_destination,
+                }
+            })
+            .or_else(|| {
+                parse_put_chosen_cards_at_library_position(&lower)
+                    .map(|position| ContinuationAst::PutChosenCardsAtLibraryPosition { position })
+            }),
         // CR 700.2: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
         // of them/those" after ChangeZone, ExileTop, RevealTop, or RevealHand →
         // ChooseFromZone building block
@@ -3390,6 +3446,40 @@ mod tests {
             Some(ContinuationAst::ChoicePartitionDestinations {
                 chosen_destination: Zone::Library,
                 rest_destination: Zone::Hand,
+            })
+        );
+    }
+
+    #[test]
+    fn put_those_cards_on_top_parses_as_library_position_continuation() {
+        let shuffle = Effect::Shuffle {
+            target: TargetFilter::Controller,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put those cards on top in any order.",
+            &shuffle,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
+                position: LibraryPosition::Top,
+            })
+        );
+    }
+
+    #[test]
+    fn put_those_cards_on_top_owner_library_variant_parses() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put those cards on top of their owner's library in any order.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
+                position: LibraryPosition::Top,
             })
         );
     }
