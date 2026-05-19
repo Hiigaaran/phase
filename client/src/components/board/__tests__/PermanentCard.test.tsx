@@ -14,10 +14,22 @@ vi.mock("../../../game/dispatch.ts", () => ({
 }));
 
 vi.mock("../../card/CardImage.tsx", () => ({
-  CardImage: ({ cardName, faceDown }: { cardName: string; faceDown?: boolean }) => (
+  CardImage: ({
+    cardName,
+    faceDown,
+    oracleText,
+    tokenFilters,
+  }: {
+    cardName: string;
+    faceDown?: boolean;
+    oracleText?: string;
+    tokenFilters?: { subtypes?: string[] };
+  }) => (
     <div
       aria-label={faceDown ? "Face-down card" : cardName}
       data-face-down={faceDown ? "true" : "false"}
+      data-oracle-text={oracleText ?? ""}
+      data-token-subtypes={tokenFilters?.subtypes?.join(",") ?? ""}
       style={{ height: "var(--card-h)", width: "var(--card-w)" }}
     />
   ),
@@ -503,5 +515,57 @@ describe("PermanentCard attachments", () => {
     );
 
     expect(getByLabelText("Face-down card")).toHaveAttribute("data-face-down", "true");
+  });
+
+  it("forwards engine-provided token rules text and subtypes to the card image", () => {
+    const lander = makeObject({
+      id: 70,
+      name: "Lander",
+      display_source: "Token",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Lander"] },
+      color: [],
+      base_color: [],
+      token_rules_text:
+        "{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+    } as Partial<GameObject>);
+
+    const gameState = {
+      ...makeState(),
+      objects: { 70: lander },
+      battlefield: [70],
+    } as unknown as GameState;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+    });
+
+    const { container } = render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set(),
+          committedAttackerIds: new Set(),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set(),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <PermanentCard objectId={70} />
+      </BoardInteractionContext.Provider>,
+    );
+
+    const image = container.querySelector("[data-oracle-text]") as HTMLElement;
+    expect(image.getAttribute("data-oracle-text")).toContain("basic land");
+    expect(image.getAttribute("data-token-subtypes")).toBe("Lander");
   });
 });

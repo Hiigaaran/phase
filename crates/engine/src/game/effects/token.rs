@@ -10,8 +10,9 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Comparator,
     ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectError,
     EffectKind, FilterProp, GainLifePlayer, ManaContribution, ManaProduction, PlayerFilter,
-    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -1016,6 +1017,68 @@ fn map_ability() -> AbilityDefinition {
     .activation_restrictions(vec![ActivationRestriction::AsSorcery])
 }
 
+/// CR 111.10u: Lander — "{2}, {T}, Sacrifice this token: Search your library
+/// for a basic land card, put it onto the battlefield tapped, then shuffle."
+fn lander_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        // CR 111.10u: search the controller's library for a basic land card.
+        Effect::SearchLibrary {
+            filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                FilterProp::HasSupertype {
+                    value: Supertype::Basic,
+                },
+            ])),
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::default(),
+        },
+    )
+    .sub_ability(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            // CR 614.1: the found land enters the battlefield tapped.
+            // (The precise subpart is 614.1c; the existing `enter_tapped`
+            //  field is annotated `CR 614.1` — kept consistent here.)
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        )
+        // CR 111.10u: then shuffle the controller's library.
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+        )),
+    )
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+            },
+            AbilityCost::Tap,
+            AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: 1,
+            },
+        ],
+    })
+}
+
 /// CR 111.10a–v: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
 pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
@@ -1027,8 +1090,25 @@ pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
         "Powerstone" => vec![powerstone_ability()],
         "Map" => vec![map_ability()],
         "Spawn" => vec![spawn_ability()],
+        "Lander" => vec![lander_ability()],
         // TODO: Incubator (transform), Shard, Gold, Junk
         _ => vec![],
+    }
+}
+
+/// CR 111.10a–v: human-readable rules text for predefined tokens, keyed by
+/// subtype. Mirrors `predefined_token_abilities` arm-for-arm — keep the two
+/// `match` blocks edited together (single source of truth). Returns `None`
+/// for subtypes whose printed text has not been backfilled; the frontend
+/// then renders no alt-text, as it does today.
+fn predefined_token_rules_text(subtype: &str) -> Option<&'static str> {
+    match subtype {
+        // CR 111.10u
+        "Lander" => Some(
+            "{2}, {T}, Sacrifice this token: Search your library for a basic \
+             land card, put it onto the battlefield tapped, then shuffle.",
+        ),
+        _ => None,
     }
 }
 
@@ -1348,6 +1428,17 @@ pub(super) fn inject_predefined_token_abilities(
     if !abilities_to_add.is_empty() {
         Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
         Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+    }
+
+    // CR 111.10: expose the predefined token's printed rules text so the
+    // frontend can render alt-text when the Scryfall token image is missing.
+    if obj.token_rules_text.is_none() {
+        for subtype in &subtypes {
+            if let Some(text) = predefined_token_rules_text(subtype) {
+                obj.token_rules_text = Some(text.to_string());
+                break;
+            }
+        }
     }
 
     if let Some(spec) = role_spec {
@@ -1891,6 +1982,186 @@ mod tests {
             abilities[0].cost,
             Some(AbilityCost::Composite { .. })
         ));
+    }
+
+    /// CR 111.10u: the Lander arm of `predefined_token_abilities` must yield
+    /// exactly one activated ability with the `{2}, {T}, Sacrifice` cost and a
+    /// basic-land library search. Discriminating: fails on the unpatched
+    /// `_ => vec![]` fallback.
+    #[test]
+    fn predefined_lander_has_search_land_ability() {
+        let abilities = predefined_token_abilities("Lander");
+        assert_eq!(abilities.len(), 1);
+        assert_eq!(abilities[0].kind, AbilityKind::Activated);
+
+        match &*abilities[0].effect {
+            Effect::SearchLibrary { filter, .. } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(tf.type_filters.contains(&TypeFilter::Land));
+                    assert!(tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::HasSupertype {
+                            value: Supertype::Basic
+                        }
+                    )));
+                }
+                other => panic!("Lander search filter must be Typed, got {other:?}"),
+            },
+            other => panic!("Lander effect must be SearchLibrary, got {other:?}"),
+        }
+
+        // Chain: SearchLibrary -> ChangeZone(enter_tapped) -> Shuffle.
+        let put = abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("Lander search chains to a ChangeZone step");
+        assert!(matches!(
+            *put.effect,
+            Effect::ChangeZone {
+                enter_tapped: true,
+                ..
+            }
+        ));
+        let shuffle = put
+            .sub_ability
+            .as_ref()
+            .expect("Lander ChangeZone chains to a Shuffle step");
+        assert!(matches!(*shuffle.effect, Effect::Shuffle { .. }));
+
+        match abilities[0].cost.as_ref().expect("Lander needs a cost") {
+            AbilityCost::Composite { costs } => {
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 2, .. }
+                    }
+                )));
+                assert!(costs.iter().any(|c| matches!(c, AbilityCost::Tap)));
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1
+                    }
+                )));
+            }
+            other => panic!("Lander cost must be Composite, got {other:?}"),
+        }
+    }
+
+    /// CR 111.10u: the Lander rules-text arm must be present and describe the
+    /// search. Discriminating: fails if Step C's text arm drifts or is removed.
+    #[test]
+    fn predefined_lander_rules_text_present() {
+        let text =
+            predefined_token_rules_text("Lander").expect("Lander must expose printed rules text");
+        assert!(text.contains("basic land"));
+        assert!(text.contains("tapped"));
+        assert!(predefined_token_rules_text("Treasure").is_none());
+    }
+
+    /// CR 111.10u: a Lander token created via the runtime injection path must
+    /// carry the activated ability AND the printed rules text. Discriminating:
+    /// on revert the token has zero abilities and `token_rules_text` is `None`.
+    #[test]
+    fn lander_token_created_with_ability_and_rules_text() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Lander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types.subtypes.push("Lander".to_string());
+            obj.is_token = true;
+        }
+
+        inject_predefined_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.abilities.len(), 1);
+        assert_eq!(obj.abilities[0].kind, AbilityKind::Activated);
+        assert_eq!(obj.base_abilities.len(), 1);
+        let rules_text = obj
+            .token_rules_text
+            .as_ref()
+            .expect("Lander token must carry printed rules text");
+        assert!(rules_text.contains("basic land"));
+    }
+
+    /// CR 111.10u + CR 614.1: full pipeline — activating the Lander ability
+    /// must search the library, put a basic land onto the battlefield tapped,
+    /// and sacrifice the Lander token. Discriminating: impossible to pass
+    /// without the `"Lander"` ability arm.
+    #[test]
+    fn lander_search_chain_resolves_basic_land_tapped() {
+        let mut state = GameState::new_two_player(42);
+
+        // A Lander token on the battlefield with its injected ability.
+        let lander = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Lander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&lander).unwrap();
+            obj.card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types.subtypes.push("Lander".to_string());
+            obj.is_token = true;
+        }
+        inject_predefined_token_abilities(&mut state, lander);
+
+        // A basic land in the controller's library to be found.
+        let forest = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types = vec![CoreType::Land];
+            obj.card_types.supertypes.push(Supertype::Basic);
+        }
+
+        // Resolve the Lander ability's effect chain directly (isolating the
+        // search/ChangeZone/Shuffle resolution from cost payment).
+        let ability_def = state.objects[&lander].abilities[0].clone();
+        let resolved = build_resolved_from_def(&ability_def, lander, PlayerId(0));
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &resolved, &mut events, 0)
+            .expect("Lander search chain should resolve");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::SearchChoice { .. }),
+            "Lander search must prompt a library card choice"
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![forest],
+            },
+        )
+        .expect("selecting the basic land should resolve the search");
+
+        assert_eq!(
+            state.objects[&forest].zone,
+            Zone::Battlefield,
+            "the searched basic land must enter the battlefield"
+        );
+        assert!(
+            state.objects[&forest].tapped,
+            "CR 614.1: the searched land must enter tapped"
+        );
     }
 
     #[test]

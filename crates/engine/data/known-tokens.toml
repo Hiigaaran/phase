@@ -1,4 +1,17 @@
 [[token]]
+id = "lander-c"
+category = { PredefinedArtifact = { kind = "Lander" } }
+fidelity = "Full"
+
+[token.body]
+display_name = "Lander"
+core_types = ["Artifact"]
+subtypes = ["Lander"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
 id = "alien-0-0-u"
 category = "Creature"
 fidelity = "Full"

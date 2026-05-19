@@ -32,6 +32,7 @@ pub enum PredefinedTokenKind {
     Blood,
     Powerstone,
     Map,
+    Lander,
 }
 
 impl PredefinedTokenKind {
@@ -46,6 +47,7 @@ impl PredefinedTokenKind {
             Self::Blood => "Blood",
             Self::Powerstone => "Powerstone",
             Self::Map => "Map",
+            Self::Lander => "Lander",
         }
     }
 }

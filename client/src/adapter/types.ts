@@ -542,6 +542,10 @@ export interface GameObject {
   base_color: ManaColor[];
   timestamp: number;
   entered_battlefield_turn: number | null;
+  /** CR 111.10: engine-provided printed rules text for predefined tokens
+   *  (Lander, etc.). Used as alt-text / aria-label when the Scryfall token
+   *  image is unavailable. Absent for non-predefined objects. */
+  token_rules_text?: string;
   unimplemented_mechanics?: string[];
   has_summoning_sickness?: boolean;
   has_mana_ability?: boolean;

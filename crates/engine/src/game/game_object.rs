@@ -281,6 +281,12 @@ pub struct GameObject {
     /// counters. Kept in sync with `CounterType::Defense` by layer evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defense: Option<u32>,
+    /// CR 111.10: printed rules text for predefined tokens (Lander, etc.).
+    /// Populated at token creation so the frontend can render alt-text / an
+    /// `aria-label` when the Scryfall token image is unavailable. `None` for
+    /// non-predefined objects (their text comes from the printed card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_rules_text: Option<String>,
     pub card_types: CardType,
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
@@ -724,6 +730,7 @@ impl GameObject {
             toughness: None,
             loyalty: None,
             defense: None,
+            token_rules_text: None,
             card_types: CardType::default(),
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),

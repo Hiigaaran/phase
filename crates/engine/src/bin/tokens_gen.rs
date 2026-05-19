@@ -382,6 +382,7 @@ fn classify_category(types: &[CoreType], subtypes: &[String]) -> Result<TokenCat
                 "Blood" => Some(PredefinedTokenKind::Blood),
                 "Powerstone" => Some(PredefinedTokenKind::Powerstone),
                 "Map" => Some(PredefinedTokenKind::Map),
+                "Lander" => Some(PredefinedTokenKind::Lander),
                 _ => None,
             })
             .collect()
