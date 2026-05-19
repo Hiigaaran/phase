@@ -1,7 +1,7 @@
 //! Regression for GitHub issue #492: Serra's Emissary's "You and creatures you
 //! control have protection from the chosen card type."
 //!
-//! CR 702.16 + CR 105.4 + CR 205.2 + CR 609.6. The compound-subject keyword
+//! CR 702.16 + CR 205.2 + CR 609.6. The compound-subject keyword
 //! grant lowers to two `StaticDefinition`s:
 //!   - object-half: `Continuous` / `AddKeyword(Protection(ChosenCardType))`;
 //!   - player-half: `PlayerProtection(ChosenCardType)` with controller-You.

@@ -953,7 +953,7 @@ impl GameObject {
         })
     }
 
-    /// CR 105.4 + CR 205.2: Look up a stored card-type choice (e.g. the card
+    /// CR 205.2: Look up a stored card-type choice (e.g. the card
     /// type chosen as this permanent entered the battlefield).
     pub fn chosen_card_type(&self) -> Option<CoreType> {
         self.chosen_attributes.iter().find_map(|a| match a {

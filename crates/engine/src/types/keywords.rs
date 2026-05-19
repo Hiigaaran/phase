@@ -308,7 +308,7 @@ pub enum ProtectionTarget {
     /// CR 702.16: Protection from the chosen color — resolved at runtime from the
     /// source permanent's `chosen_attributes`.
     ChosenColor,
-    /// CR 702.16 + CR 105.4 + CR 205.2: "Protection from the chosen card type" —
+    /// CR 702.16 + CR 205.2: "Protection from the chosen card type" —
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
     ChosenCardType,
@@ -1661,7 +1661,7 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         "multicolored" => ProtectionTarget::Multicolored,
         // CR 702.16: "the chosen color" resolves at runtime from chosen_attributes
         "the chosen color" | "chosen color" => ProtectionTarget::ChosenColor,
-        // CR 702.16 + CR 105.4 + CR 205.2: "the chosen card type" resolves at
+        // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
@@ -2262,7 +2262,7 @@ mod tests {
         );
     }
 
-    /// CR 702.16 + CR 105.4 + CR 205.2: "the chosen card type" / "chosen card
+    /// CR 702.16 + CR 205.2: "the chosen card type" / "chosen card
     /// type" parse to the runtime-resolved `ChosenCardType` variant. Plus the
     /// Blocker-C regression: the `Quality`/`CardType` fallthrough arms must
     /// lowercase their stored string — `source_matches_card_type` only matches

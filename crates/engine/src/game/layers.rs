@@ -1821,7 +1821,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     };
 
     // Pre-read chosen card type from source (avoids borrow conflict in the loop).
-    // CR 702.16 + CR 105.4 + CR 205.2: when the granted keyword is
+    // CR 702.16 + CR 205.2: when the granted keyword is
     // `Protection(ChosenCardType)`, the granting source's chosen card type must
     // be baked into the granted modifier at apply-time — the modifier lives on
     // the granted creature, which has no chosen-card-type attribute of its own.
@@ -1994,7 +1994,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                             continue;
                         }
                     }
-                    // CR 702.16 + CR 105.4 + CR 205.2: "protection from the
+                    // CR 702.16 + CR 205.2: "protection from the
                     // chosen card type" — resolve to a concrete
                     // `Protection(CardType("creature"))` from the granting
                     // source's chosen card type, so the keyword is

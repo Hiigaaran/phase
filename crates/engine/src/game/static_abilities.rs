@@ -780,7 +780,7 @@ pub fn player_protection_from(
         let protects = match target {
             // CR 702.16j: handled by the short-circuit above.
             ProtectionTarget::Everything => false,
-            // CR 702.16 + CR 105.4 + CR 205.2: protection from the card type
+            // CR 702.16 + CR 205.2: protection from the card type
             // chosen as the granting permanent (e.g. Serra's Emissary) entered.
             ProtectionTarget::ChosenCardType => state.objects.get(&source_id).is_some_and(|src| {
                 src_obj

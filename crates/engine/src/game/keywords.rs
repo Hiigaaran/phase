@@ -180,7 +180,7 @@ pub fn source_matches_protection_target(
         ProtectionTarget::ChosenColor => protected
             .chosen_color()
             .is_some_and(|color| source.color.contains(&color)),
-        // CR 702.16 + CR 105.4 + CR 205.2: "Protection from the chosen card
+        // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
         // This arm only fires for objects that themselves carry the choice
         // (e.g. Serra's Emissary); creatures it grants protection to receive a
@@ -551,7 +551,7 @@ mod tests {
         assert!(!has_keyword(&obj, &Keyword::Haste));
     }
 
-    /// CR 702.16 + CR 105.4 + CR 205.2: `source_matches_protection_target`'s
+    /// CR 702.16 + CR 205.2: `source_matches_protection_target`'s
     /// `ChosenCardType` arm resolves against the *protected* object's own
     /// chosen card type. A creature-typed source matches when the protected
     /// object chose Creature; a non-creature source does not. An object with
