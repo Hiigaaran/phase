@@ -9059,6 +9059,295 @@ mod tests {
         );
     }
 
+    /// Issue #501: Jhoira of the Ghitu grants Suspend at runtime via its
+    /// `AddKeyword` sub-ability. The granted keyword must also carry Suspend's
+    /// companion triggered abilities (CR 702.62a) — otherwise the suspend
+    /// mechanic is inert on the exiled card.
+    ///
+    /// Drives the real `apply()` pipeline: activate Jhoira, pay `{2}` + exile a
+    /// nonland card, resolve. Asserts the four time counters land on the exiled
+    /// card (CR 122.1 / CR 608.2k), the card gains effective off-zone Suspend,
+    /// and that granted Suspend resolves through `KeywordTriggerInstaller` to
+    /// the two companion triggered abilities. The behavioral counter-tick is
+    /// covered by `granted_suspend_upkeep_trigger_ticks_counter_in_exile`,
+    /// which drives a real upkeep against a permanent-duration grant.
+    #[test]
+    fn jhoira_granted_suspend_installs_upkeep_and_cast_triggers() {
+        use super::super::engine::apply_as_current;
+        use crate::types::counter::CounterType;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = setup_game_at_main_phase();
+        let jhoira = create_object(
+            &mut state,
+            CardId(980),
+            PlayerId(0),
+            "Jhoira of the Ghitu".to_string(),
+            Zone::Battlefield,
+        );
+        let nonland = create_object(
+            &mut state,
+            CardId(981),
+            PlayerId(0),
+            "Eligible Sorcery".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&jhoira).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{2}, Exile a nonland card from your hand: Put four time \
+                 counters on the exiled card. If it doesn't have suspend, it \
+                 gains suspend.",
+                "Jhoira of the Ghitu",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+        {
+            let nl = state.objects.get_mut(&nonland).unwrap();
+            nl.card_types.core_types.push(CoreType::Sorcery);
+            nl.base_card_types = nl.card_types.clone();
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: jhoira,
+                ability_index: 0,
+            },
+        )
+        .expect("Jhoira's exile-cost ability must enter the activation pipeline");
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![nonland],
+            },
+        )
+        .expect("paying the exile-from-hand cost must succeed");
+
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        // Four time counters + Suspend keyword on the exiled card.
+        assert_eq!(
+            state.objects[&nonland]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(4),
+            "the exiled card must carry four time counters"
+        );
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                nonland,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the exiled card must have suspend granted by Jhoira's sub-ability"
+        );
+
+        // The #501 fix: the exiled card's effective off-zone keywords include
+        // Suspend, and that granted keyword resolves — via the extended
+        // `KeywordTriggerInstaller::triggers_for` chokepoint — to the two
+        // companion triggered abilities. The off-zone trigger-collection path
+        // synthesizes these during `process_triggers` (the exile card is never
+        // a battlefield permanent, so `evaluate_layers` / Layer 6 never sees
+        // it — see the off-zone synthesis in `collect_matching_triggers`).
+        let off_zone_kws =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, nonland);
+        let granted_suspend = off_zone_kws
+            .iter()
+            .find(|k| k.kind() == crate::types::keywords::KeywordKind::Suspend)
+            .expect("the exiled card's effective off-zone keywords must include Suspend");
+        let companion_triggers =
+            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(granted_suspend);
+        assert_eq!(
+            companion_triggers.len(),
+            2,
+            "granted Suspend must carry the upkeep-removal + last-counter cast triggers (CR 702.62a)"
+        );
+        assert!(
+            companion_triggers
+                .iter()
+                .any(is_suspend_upkeep_trigger_shape),
+            "granted Suspend must include the upkeep counter-removal trigger (CR 702.62a)"
+        );
+        assert!(
+            companion_triggers.iter().any(|t| {
+                matches!(t.mode, TriggerMode::CounterRemoved)
+                    && t.counter_filter.as_ref().is_some_and(|f| {
+                        matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0)
+                    })
+            }),
+            "granted Suspend must include the last-counter free-cast trigger (CR 702.62a)"
+        );
+    }
+
+    /// Issue #501 — behavioral runtime discriminator. Drives the real `apply()`
+    /// pipeline: an exile-zone card with a permanent granted Suspend and four
+    /// time counters, advanced through real turn/phase progression to its
+    /// owner's next upkeep. The synthesized off-zone Suspend upkeep trigger
+    /// (CR 702.62a) must fire and remove one time counter (4 → 3).
+    ///
+    /// Reverted-fix discriminator: with the `Keyword::Suspend` arm reverted out
+    /// of `KeywordTriggerInstaller::triggers_for`, the off-zone trigger
+    /// synthesis in `collect_matching_triggers` yields nothing, no upkeep
+    /// trigger fires, and the counter stays at 4 — this test fails.
+    #[test]
+    fn granted_suspend_upkeep_trigger_ticks_counter_in_exile() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::counter::CounterType;
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        // CR 104.3c: stock both libraries so neither player decks out while the
+        // test drives real turn progression to the next upkeep.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..12u64 {
+                create_object(
+                    &mut state,
+                    CardId(2000 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Library Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        // An exiled card owned by PlayerId(0) carrying four time counters.
+        let suspended = create_object(
+            &mut state,
+            CardId(3001),
+            PlayerId(0),
+            "Suspended Sorcery".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.counters.insert(CounterType::Time, 4);
+        }
+        // A battlefield source hosting the permanent-duration granted-Suspend
+        // continuous effect (mirrors what a correctly-durationed "it gains
+        // suspend" effect produces — a CR 611.2c continuous keyword grant).
+        let grant_source = create_object(
+            &mut state,
+            CardId(3002),
+            PlayerId(0),
+            "Suspend Granter".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grant_source,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: suspended },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 0,
+                    },
+                },
+            }],
+            None,
+        );
+
+        // Sanity: the granted keyword is effective on the off-zone card.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                suspended,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the exiled card must have the permanent granted Suspend"
+        );
+
+        // Drive real turn/phase progression to PlayerId(0)'s next upkeep.
+        let start_turn = state.turn_number;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 300, "turn progression stalled before P0's upkeep");
+            if state.phase == Phase::Upkeep
+                && state.active_player == PlayerId(0)
+                && state.turn_number > start_turn
+            {
+                break;
+            }
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority pass to resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("priority pass to advance the turn");
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    apply_as_current(&mut state, GameAction::DeclareAttackers { attacks: vec![] })
+                        .expect("declare no attackers");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                other => panic!("unexpected waiting state during turn progression: {other:?}"),
+            }
+        }
+
+        // Resolve the synthesized off-zone Suspend upkeep trigger off the stack.
+        let mut guard = 0;
+        while !state.stack.is_empty() {
+            guard += 1;
+            assert!(guard < 20, "upkeep-trigger stack failed to drain");
+            apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve the suspend upkeep trigger");
+        }
+
+        assert_eq!(
+            state.objects[&suspended]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(3),
+            "the synthesized off-zone suspend upkeep trigger must tick 4 → 3"
+        );
+    }
+
+    /// Local structural mirror of `synthesis::is_suspend_upkeep_trigger` for use
+    /// in the runtime discriminator test (the synthesis predicate is private).
+    fn is_suspend_upkeep_trigger_shape(t: &crate::types::ability::TriggerDefinition) -> bool {
+        use crate::types::counter::CounterType;
+        use crate::types::triggers::TriggerMode;
+        matches!(t.mode, TriggerMode::Phase)
+            && t.phase == Some(Phase::Upkeep)
+            && t.trigger_zones == vec![Zone::Exile]
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::RemoveCounter {
+                    counter_type: Some(CounterType::Time),
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    }
+
     /// Building-block test for `TargetFilter::CostPaidObject` as an effect
     /// target: a `PutCounter` whose target is `CostPaidObject` resolves the
     /// counters onto `ability.cost_paid_object`, independent of any card.

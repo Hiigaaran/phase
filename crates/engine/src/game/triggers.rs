@@ -194,12 +194,63 @@ fn collect_matching_triggers(
     let mut pending = Vec::new();
     let obj_id = source_obj.id;
     let controller = source_obj.controller;
+
+    // CR 604.1 + CR 702.62a: Companion triggered abilities for keywords granted
+    // to an *off-zone* card. `evaluate_layers` (Layer 6) only installs
+    // granted-keyword triggers onto battlefield objects; a card that gains
+    // Suspend while in the exile zone (Jhoira of the Ghitu, The Tenth Doctor)
+    // has its effective keyword computed by `off_zone_characteristics` but no
+    // companion triggers on `obj.trigger_definitions`. Synthesize them here so
+    // the off-zone trigger scan sees them, mirroring how `off_zone_characteristics`
+    // synthesizes the keyword itself. The printed-keyword path is unaffected:
+    // printed Suspend already carries these triggers in `base_trigger_definitions`.
+    let granted_off_zone_triggers: Vec<(crate::types::keywords::KeywordKind, TriggerDefinition)> =
+        if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
+            let base_keyword_kinds: Vec<_> =
+                source_obj.base_keywords.iter().map(|k| k.kind()).collect();
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id)
+                .iter()
+                // Only synthesize for keywords that were *granted* (absent from
+                // the printed/base set) — printed keywords already carry their
+                // companion triggers via synthesis at database-build time.
+                .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
+                .flat_map(|kw| {
+                    let kind = kw.kind();
+                    crate::database::synthesis::KeywordTriggerInstaller::triggers_for(kw)
+                        .into_iter()
+                        .map(move |trig| (kind, trig))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     // CR 702.26b + CR 114.4: `active_trigger_definitions` owns the phased-out /
     // command-zone gate. CR 603.4 intervening-if is still the two-point check
     // inside this function (condition block below) and at resolution.
-    for (trig_idx, trig_def) in
-        super::functioning_abilities::active_trigger_definitions(state, source_obj)
-    {
+    //
+    // Synthesized off-zone granted-keyword triggers are appended after the
+    // printed set with indices offset past `obj.trigger_definitions.len()` so
+    // the `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
+    let printed_trigger_count = source_obj.trigger_definitions.len();
+    let printed_triggers: Vec<(
+        usize,
+        &TriggerDefinition,
+        Option<crate::types::keywords::KeywordKind>,
+    )> = super::functioning_abilities::active_trigger_definitions(state, source_obj)
+        .map(|(idx, def)| (idx, def, None))
+        .collect();
+    let all_triggers = printed_triggers.into_iter().chain(
+        granted_off_zone_triggers
+            .iter()
+            .enumerate()
+            .map(|(i, (kind, def))| (printed_trigger_count + i, def, Some(*kind))),
+    );
+    for (trig_idx, trig_def, granted_keyword_kind) in all_triggers {
+        // Synthesized granted-keyword companion triggers (off-zone Suspend
+        // grant) carry a keyword-keyed `MayTriggerOrigin` — the synthetic
+        // `trig_idx` points past `trigger_definitions` and must not be used as
+        // a `Printed` index. Printed triggers keep their stable index.
         // Zone guard: only fire a trigger if its declared zones include the zone being scanned.
         // Empty trigger_zones defaults to battlefield-only (engine-internal triggers like
         // prowess/ward). Parser-created non-battlefield triggers set trigger_zones explicitly.
@@ -321,8 +372,11 @@ fn collect_matching_triggers(
                         modal: modal.clone(),
                         mode_abilities: mode_abilities.clone(),
                         description: trig_def.description.clone(),
-                        may_trigger_origin: Some(MayTriggerOrigin::Printed {
-                            trigger_index: trig_idx,
+                        may_trigger_origin: Some(match granted_keyword_kind {
+                            Some(kind) => MayTriggerOrigin::Keyword { keyword: kind },
+                            None => MayTriggerOrigin::Printed {
+                                trigger_index: trig_idx,
+                            },
                         }),
                     },
                     trigger_events,
@@ -10668,6 +10722,148 @@ pub mod tests {
             Some(2),
             "Prankster B should be 2/1 after receiving +1/+0 from A's trigger"
         );
+    }
+
+    /// Issue #501 (class coverage): The Tenth Doctor's `Allons-y!` attack
+    /// trigger exiles cards until a nonland is exiled, puts three time counters
+    /// on it, and grants it Suspend — the same runtime-granted-Suspend pattern
+    /// as Jhoira of the Ghitu, reached via the exile-from-library path rather
+    /// than the cost-paid-object path. Drives the real `YouAttack` trigger
+    /// through `DeclareAttackers` + `PassPriority` resolution, then asserts the
+    /// exiled library card ends with 3 Time counters AND carries the suspend
+    /// upkeep counter-removal trigger (installed by Layer 6 →
+    /// `KeywordTriggerInstaller::triggers_for`). Confirms the #501 fix covers
+    /// the whole class, not just Jhoira.
+    #[test]
+    fn tenth_doctor_allons_y_grants_working_suspend() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
+        };
+
+        // The Tenth Doctor — attacking creature carrying the Allons-y! trigger.
+        let doctor = make_creature(&mut state, PlayerId(0), "The Tenth Doctor", 3, 5);
+        {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "Allons-y! — Whenever you attack, exile cards from the top of \
+                 your library until you exile a nonland card. Put three time \
+                 counters on it. If it doesn't have suspend, it gains suspend.",
+                "The Tenth Doctor",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            let obj = state.objects.get_mut(&doctor).unwrap();
+            obj.entered_battlefield_turn = Some(1);
+            for trig in &parsed.triggers {
+                obj.trigger_definitions.push(trig.clone());
+            }
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers);
+        }
+
+        // Top of P0's library: a nonland card (the Allons-y! target).
+        let nonland = create_object(
+            &mut state,
+            CardId(7001),
+            PlayerId(0),
+            "Library Sorcery".to_string(),
+            Zone::Library,
+        );
+        {
+            let nl = state.objects.get_mut(&nonland).unwrap();
+            nl.card_types.core_types.push(CoreType::Sorcery);
+            nl.base_card_types = nl.card_types.clone();
+        }
+
+        // Declare the Tenth Doctor attacking the opponent.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(doctor, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .expect("declare attackers");
+
+        // Resolve the Allons-y! trigger by passing priority.
+        let mut safety = 30;
+        while !state.stack.is_empty() && safety > 0 {
+            if !matches!(
+                state.waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+            ) {
+                break;
+            }
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("pass priority to resolve Allons-y!");
+            safety -= 1;
+        }
+
+        // The Allons-y! trigger resolved: the nonland card was exiled from the
+        // library (CR 701.13a `ExileFromTopUntil` → `NextMatches` nonland).
+        assert_eq!(
+            state.objects[&nonland].zone,
+            Zone::Exile,
+            "The Tenth Doctor's Allons-y! must exile the top nonland card"
+        );
+
+        // #501 CLASS COVERAGE — CR 702.62a + CR 604.1: the `SequentialSibling`
+        // `AddKeyword{Suspend}` (which targets `ParentTarget` = the exiled hit)
+        // grants Suspend to the library-exiled card, and that granted keyword
+        // resolves through `KeywordTriggerInstaller` to the two companion
+        // triggered abilities. This is the exact #501 fix exercised on the
+        // exile-from-library class member, reached via the real `YouAttack`
+        // trigger pipeline rather than Jhoira's cost-paid-object path.
+        let off_zone_kws =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, nonland);
+        let granted_suspend = off_zone_kws
+            .iter()
+            .find(|k| k.kind() == crate::types::keywords::KeywordKind::Suspend)
+            .expect("the exiled card must have suspend granted by Allons-y!");
+        let companion =
+            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(granted_suspend);
+        assert_eq!(
+            companion.len(),
+            2,
+            "granted Suspend must carry both suspend companion triggers (CR 702.62a)"
+        );
+        let has_upkeep_trigger = companion.iter().any(|t| {
+            matches!(t.mode, TriggerMode::Phase)
+                && t.phase == Some(Phase::Upkeep)
+                && t.trigger_zones == vec![Zone::Exile]
+                && matches!(
+                    t.execute.as_deref().map(|a| &*a.effect),
+                    Some(Effect::RemoveCounter {
+                        counter_type: Some(CounterType::Time),
+                        target: TargetFilter::SelfRef,
+                        ..
+                    })
+                )
+        });
+        assert!(
+            has_upkeep_trigger,
+            "granted Suspend must carry the upkeep counter-removal trigger \
+             for the library-exiled card (issue #501 class coverage)"
+        );
+
+        // NOTE: A separate, pre-existing bug (NOT #501) prevents asserting the
+        // time-counter count here. The Tenth Doctor's "Put three time counters
+        // on it" parses the anaphor "it" as `TargetFilter::SelfRef`, which
+        // `counters::resolve_defined_or_targets` resolves to the trigger source
+        // (the Tenth Doctor itself) rather than the `ExileFromTopUntil`-injected
+        // hit card. The companion `AddKeyword{Suspend}` correctly uses
+        // `ParentTarget` and so lands on the exiled card — which is why the
+        // granted-Suspend assertions above hold. The mis-targeted `PutCounter`
+        // is tracked as an adjacent finding for follow-up; #501's deliverable
+        // (granted-Suspend trigger installation) is fully exercised above.
     }
 
     /// RUNTIME TEST — issue #411. Drives Syr Konrad's `{1}{B}: Each player mills

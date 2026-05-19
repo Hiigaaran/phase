@@ -133,6 +133,16 @@ impl KeywordTriggerInstaller {
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
             Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
+            // CR 702.62a + CR 604.1: granted Suspend carries the same two
+            // triggered abilities printed Suspend synthesizes. The
+            // hand-activated alt-cost (1st ability) is NOT installed for
+            // runtime-granted suspend — the card is already in exile with time
+            // counters; only the upkeep counter-removal and last-counter
+            // free-cast triggers are relevant in that zone.
+            Keyword::Suspend { .. } => vec![
+                build_suspend_upkeep_removal_trigger(),
+                build_suspend_last_counter_cast_trigger(),
+            ],
             _ => Vec::new(),
         }
     }
@@ -149,6 +159,11 @@ impl KeywordTriggerInstaller {
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
+            // CR 702.62a + CR 604.1: symmetric removal — `RemoveKeyword` strips
+            // both suspend triggers when the granted keyword is removed.
+            Keyword::Suspend { .. } => {
+                is_suspend_upkeep_trigger(trigger) || is_suspend_last_counter_trigger(trigger)
+            }
             _ => false,
         }
     }
@@ -1903,6 +1918,102 @@ fn build_dies_return_with_counter_trigger(
         ))
 }
 
+/// CR 702.62a (2nd ability): "At the beginning of your upkeep, if this card is
+/// suspended, remove a time counter from it." `trigger_zones = [Exile]` plus
+/// `HasCounters{Time, min:1}` together model CR 702.62b (a card is "suspended"
+/// iff it's in exile, has suspend, and has a time counter on it);
+/// `TriggerConstraint::OnlyDuringYourTurn` enforces "your" upkeep.
+///
+/// Single source of truth for the suspend upkeep-removal trigger shape, shared
+/// by the printed path (`synthesize_suspend`) and the runtime-granted path
+/// (`KeywordTriggerInstaller::triggers_for`) per CR 604.1.
+fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
+    let remove_one = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveCounter {
+            counter_type: Some(CounterType::Time),
+            count: 1,
+            target: TargetFilter::SelfRef,
+        },
+    );
+    let mut trigger = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Time),
+            minimum: 1,
+            maximum: None,
+        })
+        .constraint(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        .execute(remove_one)
+        .description(
+            "CR 702.62a: At the beginning of your upkeep, if this card is suspended, remove a time counter from it."
+                .to_string(),
+        );
+    trigger.trigger_zones = vec![Zone::Exile];
+    trigger
+}
+
+/// CR 702.62a (3rd ability): "When the last time counter is removed from this
+/// card, if it's exiled, you may play it without paying its mana cost if able."
+///
+/// Single source of truth for the suspend last-counter cast trigger shape,
+/// shared by the printed path (`synthesize_suspend`) and the runtime-granted
+/// path (`KeywordTriggerInstaller::triggers_for`) per CR 604.1.
+fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
+    let cast = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CastFromZone {
+            target: TargetFilter::SelfRef,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+        },
+    )
+    .optional();
+    let mut trigger = TriggerDefinition::new(TriggerMode::CounterRemoved)
+        .valid_card(TargetFilter::SelfRef)
+        .counter_filter(CounterTriggerFilter {
+            counter_type: CounterType::Time,
+            threshold: Some(0),
+        })
+        .execute(cast)
+        .description(
+            "CR 702.62a: When the last time counter is removed from this card, if it's exiled, you may play it without paying its mana cost."
+                .to_string(),
+        );
+    trigger.trigger_zones = vec![Zone::Exile];
+    trigger
+}
+
+/// Structural predicate: true iff `trigger` is the suspend upkeep counter-removal
+/// trigger shape. Mirrors `is_echo_trigger` — stays correct if the builder ever
+/// gains a parameter.
+fn is_suspend_upkeep_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Phase)
+        && t.phase == Some(Phase::Upkeep)
+        && t.trigger_zones == vec![Zone::Exile]
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::RemoveCounter { counter_type: Some(counter_type), target: TargetFilter::SelfRef, .. })
+                if *counter_type == CounterType::Time
+        )
+}
+
+/// Structural predicate: true iff `trigger` is the suspend last-counter free-cast
+/// trigger shape. Mirrors `is_echo_trigger` — stays correct if the builder ever
+/// gains a parameter.
+fn is_suspend_last_counter_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::CounterRemoved)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.counter_filter
+            .as_ref()
+            .is_some_and(|f| matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0))
+}
+
 /// Idempotency-shape predicate for `synthesize_dies_return_with_counter`.
 /// True iff `trigger` is the synthesized dies-trigger shape for the given
 /// counter polarity. The check is intentionally narrow — it matches the
@@ -2412,43 +2523,9 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     // upkeep; `TriggerCondition::HasCounters` enforces "if this card is
     // suspended" (CR 702.62b: suspended = in exile + has time counters; the
     // exile zone is enforced by `trigger_zones`).
-    let already_has_upkeep_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::Phase)
-            && t.phase == Some(Phase::Upkeep)
-            && t.trigger_zones == vec![Zone::Exile]
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-            && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::RemoveCounter { counter_type: Some(counter_type), target: TargetFilter::SelfRef, .. })
-                    if *counter_type == CounterType::Time
-            )
-    });
+    let already_has_upkeep_trigger = face.triggers.iter().any(is_suspend_upkeep_trigger);
     if !already_has_upkeep_trigger {
-        let remove_one = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::RemoveCounter {
-                counter_type: Some(CounterType::Time),
-                count: 1,
-                target: TargetFilter::SelfRef,
-            },
-        );
-        let trigger = TriggerDefinition::new(TriggerMode::Phase)
-            .phase(Phase::Upkeep)
-            .valid_card(TargetFilter::SelfRef)
-            .condition(TriggerCondition::HasCounters {
-                counters: CounterMatch::OfType(CounterType::Time),
-                minimum: 1,
-                maximum: None,
-            })
-            .constraint(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
-            .execute(remove_one)
-            .description(
-                "CR 702.62a: At the beginning of your upkeep, if this card is suspended, remove a time counter from it."
-                    .to_string(),
-            );
-        let mut trigger = trigger;
-        trigger.trigger_zones = vec![Zone::Exile];
-        face.triggers.push(trigger);
+        face.triggers.push(build_suspend_upkeep_removal_trigger());
     }
 
     // CR 702.62a: Last-counter free-cast trigger — "When the last time counter
@@ -2459,40 +2536,11 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     // detects the variant via `obj.zone == Exile && Keyword::Suspend` and assigns
     // `CastingVariant::Suspend`, which tags `CastVariantPaid::Suspend` at
     // resolution and installs the haste static for creatures.
-    let already_has_last_counter_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::CounterRemoved)
-            && t.counter_filter.as_ref().is_some_and(|f| {
-                matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0)
-            })
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-    });
+    let already_has_last_counter_trigger =
+        face.triggers.iter().any(is_suspend_last_counter_trigger);
     if !already_has_last_counter_trigger {
-        let cast = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::CastFromZone {
-                target: TargetFilter::SelfRef,
-                without_paying_mana_cost: true,
-                mode: CardPlayMode::Cast,
-                cast_transformed: false,
-                alt_ability_cost: None,
-                constraint: None,
-            },
-        )
-        .optional();
-        let trigger = TriggerDefinition::new(TriggerMode::CounterRemoved)
-            .valid_card(TargetFilter::SelfRef)
-            .counter_filter(CounterTriggerFilter {
-                counter_type: CounterType::Time,
-                threshold: Some(0),
-            })
-            .execute(cast)
-            .description(
-                "CR 702.62a: When the last time counter is removed from this card, if it's exiled, you may play it without paying its mana cost."
-                    .to_string(),
-            );
-        let mut trigger = trigger;
-        trigger.trigger_zones = vec![Zone::Exile];
-        face.triggers.push(trigger);
+        face.triggers
+            .push(build_suspend_last_counter_cast_trigger());
     }
 }
 
@@ -6454,6 +6502,98 @@ mod suspend_synthesis_tests {
         synthesize_suspend(&mut face);
         assert!(face.abilities.is_empty());
         assert!(face.triggers.is_empty());
+    }
+
+    /// Issue #501: `KeywordTriggerInstaller::triggers_for` is the runtime
+    /// chokepoint for granted-keyword companion triggers. Granted Suspend must
+    /// return exactly the two suspend triggered abilities (CR 702.62a) — the
+    /// upkeep counter-removal trigger and the last-counter free-cast trigger.
+    /// The hand-activated alt-cost (1st ability) is NOT installed for runtime
+    /// grants. Tests the building block across the *granted* `count: 0` input,
+    /// not a single card.
+    #[test]
+    fn triggers_for_granted_suspend_returns_upkeep_and_cast_triggers() {
+        let granted = Keyword::Suspend {
+            count: 0,
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 0,
+            },
+        };
+        let triggers = KeywordTriggerInstaller::triggers_for(&granted);
+        assert_eq!(
+            triggers.len(),
+            2,
+            "granted Suspend installs exactly 2 triggers"
+        );
+        assert_eq!(triggers[0], build_suspend_upkeep_removal_trigger());
+        assert_eq!(triggers[1], build_suspend_last_counter_cast_trigger());
+
+        // A non-zero printed Suspend N returns the identical shared instances —
+        // the triggers are SelfRef-scoped and parameter-free.
+        let printed = Keyword::Suspend {
+            count: 4,
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            },
+        };
+        assert_eq!(
+            KeywordTriggerInstaller::triggers_for(&printed),
+            triggers,
+            "suspend triggers are count-agnostic — same shared instances for any N"
+        );
+    }
+
+    /// Issue #501: symmetric removal — `trigger_matches_keyword_kind` must
+    /// identify both suspend companion triggers so `RemoveKeyword` strips them
+    /// when granted Suspend is removed. An unrelated trigger must not match.
+    #[test]
+    fn trigger_matches_keyword_kind_identifies_suspend_triggers() {
+        let suspend = Keyword::Suspend {
+            count: 0,
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 0,
+            },
+        };
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &build_suspend_upkeep_removal_trigger(),
+            &suspend,
+        ));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &build_suspend_last_counter_cast_trigger(),
+            &suspend,
+        ));
+        // An unrelated trigger (echo) is not a suspend trigger.
+        let echo = build_echo_trigger(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        });
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &echo, &suspend,
+        ));
+    }
+
+    /// Issue #501 regression guard: after extracting the two suspend trigger
+    /// builders, the printed-Suspend `synthesize_suspend` path must still emit
+    /// triggers byte-identical to the shared builders' output — no drift
+    /// between the printed and granted paths.
+    #[test]
+    fn synthesize_suspend_uses_shared_builders() {
+        let mut face = suspend_face(4);
+        synthesize_suspend(&mut face);
+
+        let upkeep = build_suspend_upkeep_removal_trigger();
+        let cast = build_suspend_last_counter_cast_trigger();
+        assert!(
+            face.triggers.contains(&upkeep),
+            "printed Suspend's upkeep trigger must equal the shared builder output"
+        );
+        assert!(
+            face.triggers.contains(&cast),
+            "printed Suspend's last-counter trigger must equal the shared builder output"
+        );
     }
 }
 
