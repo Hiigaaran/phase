@@ -3714,6 +3714,174 @@ pub mod tests {
         assert_eq!(state.objects[&entrant].paired_with, None);
     }
 
+    /// Install the synthesized Evolve trigger (CR 702.100a) onto a battlefield
+    /// creature, mirroring `make_soulbond_creature` / `make_undying_creature`.
+    fn make_evolve_creature(
+        state: &mut GameState,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let id = make_creature(state, player, name, power, toughness);
+        let triggers =
+            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(&Keyword::Evolve);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.keywords.push(Keyword::Evolve);
+        obj.base_keywords.push(Keyword::Evolve);
+        for trigger in &triggers {
+            obj.trigger_definitions.push(trigger.clone());
+        }
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers);
+        id
+    }
+
+    /// Count `Plus1Plus1` counters on an object.
+    fn plus1_counters(state: &GameState, id: ObjectId) -> u32 {
+        state.objects[&id]
+            .counters
+            .iter()
+            .filter(|(ct, _)| **ct == crate::types::counter::CounterType::Plus1Plus1)
+            .map(|(_, n)| *n)
+            .sum()
+    }
+
+    /// CR 702.100a + CR 603.4: a creature with greater power entering the
+    /// battlefield triggers Evolve; the intervening-if (resolved against the
+    /// detection-time `EventSource` event) passes, the trigger goes on the
+    /// stack, resolves, and places exactly one +1/+1 counter on the Evolve
+    /// creature. Drives the real ETB detection path so the detection-time
+    /// `EventSource` P/T resolution (quantity.rs section D) is exercised.
+    #[test]
+    fn test_evolve_larger_creature_grants_counter() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let evolver = make_evolve_creature(&mut state, PlayerId(0), "Evolve 2/2", 2, 2);
+        let entrant = make_creature(&mut state, PlayerId(0), "Bigger 3/3", 3, 3);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                entrant,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        assert_eq!(state.stack.len(), 1, "Evolve trigger must go on the stack");
+
+        resolve_stack_without_soulbond_prompt(&mut state);
+        assert_eq!(
+            plus1_counters(&state, evolver),
+            1,
+            "Evolve places exactly one +1/+1 counter (CR 702.100a)"
+        );
+    }
+
+    /// CR 702.100a: a creature whose power AND toughness are both not greater
+    /// (smaller, or equal) does NOT trigger Evolve — the intervening-if uses
+    /// strict greater-than, not greater-or-equal.
+    #[test]
+    fn test_evolve_smaller_or_equal_creature_no_counter() {
+        // Smaller entrant — 1/1 vs the 2/2 Evolve creature.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let evolver = make_evolve_creature(&mut state, PlayerId(0), "Evolve 2/2", 2, 2);
+        let smaller = make_creature(&mut state, PlayerId(0), "Smaller 1/1", 1, 1);
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                smaller,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "smaller creature must not trigger Evolve"
+        );
+        assert_eq!(plus1_counters(&state, evolver), 0);
+
+        // Equal entrant — 2/2 vs the 2/2 Evolve creature: CR 702.100a requires
+        // *greater*, so equal P/T does not trigger.
+        let equal = make_creature(&mut state, PlayerId(0), "Equal 2/2", 2, 2);
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                equal,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "equal-P/T creature must not trigger Evolve (greater, not greater-or-equal)"
+        );
+        assert_eq!(plus1_counters(&state, evolver), 0);
+    }
+
+    /// CR 702.100a + CR 604.1: Evolve granted to a creature at runtime (via the
+    /// `trigger_matches_keyword_kind` install path) behaves identically to
+    /// printed Evolve. A vanilla 2/2 granted Evolve gains a +1/+1 counter when
+    /// a 3/3 enters.
+    #[test]
+    fn test_granted_evolve_triggers() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Vanilla 2/2 — Evolve is granted at runtime, not printed.
+        let granted = make_creature(&mut state, PlayerId(0), "Granted Evolve 2/2", 2, 2);
+        let triggers =
+            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(&Keyword::Evolve);
+        // Confirm the granted-keyword install path recognizes the synthesized
+        // trigger (step A.2 — trigger_matches_keyword_kind).
+        for trigger in &triggers {
+            assert!(
+                crate::database::synthesis::KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                    trigger,
+                    &Keyword::Evolve,
+                ),
+                "granted-Evolve install path must recognize the synthesized trigger"
+            );
+        }
+        {
+            let obj = state.objects.get_mut(&granted).unwrap();
+            obj.keywords.push(Keyword::Evolve);
+            for trigger in &triggers {
+                obj.trigger_definitions.push(trigger.clone());
+            }
+        }
+
+        let entrant = make_creature(&mut state, PlayerId(0), "Bigger 3/3", 3, 3);
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                entrant,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        assert_eq!(state.stack.len(), 1, "granted Evolve must go on the stack");
+        resolve_stack_without_soulbond_prompt(&mut state);
+        assert_eq!(
+            plus1_counters(&state, granted),
+            1,
+            "granted Evolve places one +1/+1 counter"
+        );
+    }
+
     #[test]
     fn soulbond_paired_static_applies_to_both_and_ends_when_pair_breaks() {
         let mut state = setup();

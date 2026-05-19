@@ -131,6 +131,7 @@ impl KeywordTriggerInstaller {
                 "M1M1", "-1/-1", "702.79a",
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
             // CR 702.62a + CR 604.1: granted Suspend carries the same two
@@ -157,6 +158,7 @@ impl KeywordTriggerInstaller {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
             // CR 702.62a + CR 604.1: symmetric removal — `RemoveKeyword` strips
@@ -1618,6 +1620,14 @@ pub fn synthesize_annihilator(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
 }
 
+/// CR 702.100a: Evolve — an ETB trigger that fires whenever another creature you
+/// control enters with greater power or toughness than the Evolve creature,
+/// putting a +1/+1 counter on it. CR 702.100d: each instance triggers
+/// separately, so one trigger is synthesized per `Keyword::Evolve` instance.
+pub fn synthesize_evolve(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Evolve));
+}
+
 /// CR 702.116a: Myriad is an attack trigger. On resolution, the controller may
 /// create one tapped attacking copy token for each opponent other than the
 /// source creature's defending player; if any are created, they are exiled at
@@ -1769,6 +1779,14 @@ fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
+/// Idempotency-shape predicate for `synthesize`-installed Evolve triggers.
+/// `TriggerMode::Evolved` is unique to the Evolve keyword, so the mode alone
+/// uniquely identifies a synthesized Evolve trigger — no execute-shape check
+/// is needed (or wanted: it would disambiguate nothing).
+fn is_evolve_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Evolved)
+}
+
 fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::Attacks)
         && matches!(t.valid_card, Some(TargetFilter::SelfRef))
@@ -1858,6 +1876,79 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
             "CR 702.86a: Annihilator {n} — whenever ~ attacks, defending player sacrifices {n} permanent{}.",
             if n == 1 { "" } else { "s" }
         ))
+}
+
+/// CR 702.100a: Evolve — "Whenever a creature you control enters, if that
+/// creature's power is greater than this creature's power and/or that
+/// creature's toughness is greater than this creature's toughness, put a
+/// +1/+1 counter on this creature."
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Evolve`, so every printed
+/// Evolve card and every creature granted Evolve at runtime gets an identical
+/// trigger. CR 702.100d (multiple Evolve instances trigger separately) is
+/// satisfied for free by `triggers_for` being invoked per keyword instance.
+fn build_evolve_trigger() -> TriggerDefinition {
+    // CR 122.1: put a single +1/+1 counter on the Evolve creature itself.
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Put a +1/+1 counter on this creature".to_string());
+
+    // CR 702.100a "and/or": fire if the entering creature's power is greater
+    // OR its toughness is greater than this creature's. CR 603.4: this is the
+    // intervening-if — checked at detection AND re-checked on resolution.
+    let condition = TriggerCondition::Or {
+        conditions: vec![
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            },
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            },
+        ],
+    };
+
+    // CR 702.100a: "a creature you control enters". `.destination(Battlefield)`
+    // constrains the trigger definition itself to entering the battlefield;
+    // `valid_card` selects any creature the trigger controller controls
+    // (including the Evolve creature itself — its self-vs-self P/T comparison
+    // yields equal values, so the strict-`GT` intervening-if filters it out).
+    TriggerDefinition::new(TriggerMode::Evolved)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .condition(condition)
+        .execute(put_counter)
+        .description(
+            "CR 702.100a: Evolve — whenever a creature you control enters with greater power or toughness than ~, put a +1/+1 counter on ~."
+                .to_string(),
+        )
 }
 
 /// Shared trigger builder for the Undying/Persist class (CR 702.93a / CR 702.79a):
@@ -2684,6 +2775,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // separately. Defending player resolved per-attacker via
     // `ControllerRef::DefendingPlayer` (CR 508.5 / 508.5a).
     synthesize_annihilator(face);
+    // CR 702.100a: Evolve — ETB trigger that puts a +1/+1 counter on the
+    // creature whenever another creature you control enters with greater power
+    // or toughness. CR 702.100d: each instance triggers separately.
+    synthesize_evolve(face);
     // CR 702.116a: Myriad — attack trigger creating tapped attacking copy
     // tokens for each opponent other than the source creature's defending
     // player, exiled at end of combat. CR 702.116b: each instance triggers

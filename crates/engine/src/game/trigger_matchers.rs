@@ -15,7 +15,12 @@ use super::triggers::TriggerMatcher;
 
 pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
     Some(match mode {
-        TriggerMode::ChangesZone => match_changes_zone,
+        // CR 702.100a: Evolve — fires when a creature the trigger controller
+        // controls enters the battlefield. build_evolve_trigger sets
+        // .destination(Battlefield); valid_card filtering and the power/toughness
+        // intervening-if (CR 603.4) are handled downstream by
+        // zone_change_clause_matches / check_trigger_condition respectively.
+        TriggerMode::ChangesZone | TriggerMode::Evolved => match_changes_zone,
         TriggerMode::ChangesZoneAll => match_changes_zone_all,
         TriggerMode::DamageDone
         | TriggerMode::DamageDoneOnce
@@ -133,7 +138,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::LosesGame
         | TriggerMode::Championed
         | TriggerMode::Exerted
-        | TriggerMode::Evolved
         | TriggerMode::Enlisted
         | TriggerMode::Adapt
         | TriggerMode::Foretell
@@ -357,7 +361,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Exerted,
         // TriggerMode::Crewed — moved to real matcher below
         // TriggerMode::Saddled — moved to real matcher below
-        TriggerMode::Evolved,
+        // TriggerMode::Evolved — moved to real matcher below
         TriggerMode::Enlisted,
         TriggerMode::Adapt,
         TriggerMode::Foretell,
@@ -397,6 +401,13 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     for mode in unimplemented_modes {
         r.insert(mode, match_unimplemented);
     }
+
+    // CR 702.100a: Evolve — fires when a creature the trigger controller
+    // controls enters the battlefield. build_evolve_trigger sets
+    // .destination(Battlefield); valid_card filtering and the power/toughness
+    // intervening-if (CR 603.4) are handled downstream by
+    // zone_change_clause_matches / check_trigger_condition respectively.
+    r.insert(TriggerMode::Evolved, match_changes_zone);
 
     // CR 702.122d: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);

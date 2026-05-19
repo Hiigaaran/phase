@@ -1936,10 +1936,16 @@ fn object_for_scope<'a>(
                 })
             })
             .or_else(|| state.objects.get(&ctx.source)),
+        // CR 603.4: an intervening-if condition is checked at trigger detection
+        // (current_trigger_event is None then) and re-checked on resolution.
+        // EventSource-scoped quantities must resolve at BOTH times — fall back to
+        // the detection-time event TLS, mirroring triggering_event_player.
         ObjectScope::EventSource => state
             .current_trigger_event
             .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event)
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_source_from_event(&e))
             .and_then(|id| state.objects.get(&id)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
@@ -1970,10 +1976,16 @@ fn object_id_for_scope(
                 })
             })
             .or(Some(ctx.source)),
+        // CR 603.4: an intervening-if condition is checked at trigger detection
+        // (current_trigger_event is None then) and re-checked on resolution.
+        // EventSource-scoped quantities must resolve at BOTH times — fall back to
+        // the detection-time event TLS, mirroring triggering_event_player.
         ObjectScope::EventSource => state
             .current_trigger_event
             .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event),
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_source_from_event(&e)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to an `ObjectId` here — both are snapshot
