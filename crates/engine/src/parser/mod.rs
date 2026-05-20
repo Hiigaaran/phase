@@ -15,6 +15,7 @@ pub mod oracle_nom;
 pub(crate) mod oracle_quantity;
 pub(crate) mod oracle_replacement;
 pub(crate) mod oracle_saga;
+pub(crate) mod oracle_separate_piles;
 pub(crate) mod oracle_spacecraft;
 pub(crate) mod oracle_special;
 pub mod oracle_static;

@@ -1324,6 +1324,8 @@ impl GameRunner {
             WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
             WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
+            WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
+            WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
         }
     }
 

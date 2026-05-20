@@ -2529,7 +2529,19 @@ pub(crate) fn parse_oracle_ir(
             // mis-parse `"For each player, choose friend or foe."` as an
             // Unimplemented chunk and leave the per-class clauses to chain as
             // ordinary sequential effects.
-            let mut def = if let Some(vote_def) =
+            // CR 700.3: Pile-separation primitive (Make an Example and the
+            // Liliana −6 / Fact-or-Fiction family). The dispatcher consumes
+            // the entire three-sentence block as a single effect — chain
+            // parsing would mis-parse "Each opponent separates ..." as
+            // Unimplemented{separate} followed by a stray Sacrifice
+            // sub-ability with a `repeat_for` rider.
+            let mut def = if let Some(pile_def) =
+                crate::parser::oracle_separate_piles::parse_separate_into_piles(
+                    parse_line,
+                    AbilityKind::Spell,
+                ) {
+                pile_def
+            } else if let Some(vote_def) =
                 crate::parser::oracle_vote::parse_vote_block(parse_line, AbilityKind::Spell)
             {
                 vote_def

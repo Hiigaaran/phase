@@ -2152,6 +2152,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ProcessRadCounters
         | Effect::Clash
         | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }

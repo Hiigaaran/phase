@@ -230,6 +230,22 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 700.3 + CR 700.3a: Submit one pile (pile A) of a
+    /// `SeparateIntoPiles` partition. Pile B is derived by the engine as
+    /// `eligible \ pile_a` — CR 700.3a requires the partition to be
+    /// exhaustive and disjoint, and CR 700.3d permits either pile to be
+    /// empty. Plain `Vec` payload (transport-only); the engine ledger uses
+    /// `im::Vector` per the persistent-container convention.
+    SubmitPilePartition {
+        pile_a: Vec<ObjectId>,
+    },
+    /// CR 700.3: Chooser selects one of the two piles produced by a
+    /// `SeparateIntoPiles` partition. Typed [`PileSide`] rather than `bool`
+    /// so the action shape is self-documenting and the parser/AI cannot
+    /// accidentally swap pile semantics.
+    ChoosePile {
+        pile: crate::types::game_state::PileSide,
+    },
     /// CR 701.55a: Choose one branch of a resolution-time "A or B" instruction.
     ChooseBranch {
         index: usize,
@@ -1016,6 +1032,8 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitPilePartition { .. }
+            | GameAction::ChoosePile { .. }
             | GameAction::ChooseBranch { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }

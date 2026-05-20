@@ -115,6 +115,7 @@ pub mod scry;
 pub mod search_library;
 pub mod search_outside_game;
 pub mod seek;
+pub mod separate_piles;
 pub mod set_class_level;
 pub mod shuffle;
 pub mod skip_next_step;
@@ -1106,6 +1107,8 @@ pub fn resolve_effect(
         Effect::Clash => clash::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
         Effect::Vote { .. } => vote::resolve(state, ability, events),
+        // CR 700.3 + CR 608: Pile-separation primitive — see effects/separate_piles.rs.
+        Effect::SeparateIntoPiles { .. } => separate_piles::resolve(state, ability, events),
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),

@@ -4966,6 +4966,43 @@ pub enum Effect {
         #[serde(default = "default_voter_scope_all")]
         voter_scope: VoterScope,
     },
+    /// CR 700.3 + CR 608: Separate objects into two piles, have another player
+    /// choose one of them, and apply a sub-effect to the chosen pile. The
+    /// canonical "two piles" primitive — covers Make an Example (each opponent
+    /// partitions their own creatures, you choose, they sacrifice the chosen
+    /// pile) and is built so Liliana of the Veil −6 ("target player") and the
+    /// Fact or Fiction family can extend it via leaf parameterization.
+    ///
+    /// Resolution is fully interactive: the partitioner submits one pile (pile
+    /// A); pile B is derived as `eligible \ pile_a` (CR 700.3a — exhaustive
+    /// disjoint partition, CR 700.3d — piles may be empty). The chooser then
+    /// picks A or B per subject. Finally `chosen_pile_effect` resolves once
+    /// for each object in each chosen pile, scoped to that subject as
+    /// controller.
+    ///
+    /// Per CR 700.3b a pile is not a `GameObject`; the runtime carries piles
+    /// as transient `im::Vector<ObjectId>` on the relevant `WaitingFor`
+    /// variants. Per CR 700.3c, partitioned objects do not leave their zone
+    /// during the partition/choice steps — only the final sub-effect acts on
+    /// them.
+    SeparateIntoPiles {
+        /// CR 101.4 + CR 800.4g: Which players partition their own objects.
+        /// `EachOpponent` is the Make-an-Example shape; Liliana −6 will
+        /// extend this with a `TargetPlayers`-style variant on `VoterScope`.
+        partition_subject: VoterScope,
+        /// Filter applied to each subject's eligible object set (the
+        /// resolver constrains the controller to the subject before applying
+        /// this filter). Typically `Typed(Creature)` for Make an Example.
+        #[serde(default = "default_target_filter_any")]
+        object_filter: TargetFilter,
+        /// CR 700.3 + CR 608.2c: Which player chooses one pile per subject.
+        /// `Controller` covers "you choose" — the spell controller.
+        chooser: PlayerScope,
+        /// CR 608.2c: Sub-effect applied to each chosen pile, once per object,
+        /// with the subject rebound as controller. Sacrifice for Make an
+        /// Example; the building block accepts any per-object effect.
+        chosen_pile_effect: Box<AbilityDefinition>,
+    },
     /// CR 613.4d: Switch a creature's power and toughness. Applied in layer 7d.
     SwitchPT {
         #[serde(default = "default_target_filter_any")]
@@ -6745,6 +6782,9 @@ impl Effect {
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
             // `filter` constrains the interactive selection, not a targeting slot.
             | Effect::ChooseObjectsIntoTrackedSet { .. }
+            // CR 700.3b: SeparateIntoPiles has no targeting slot — partitioning
+            // is a resolution-time set computation against `object_filter`.
+            | Effect::SeparateIntoPiles { .. }
             // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
             // it has no discrete `target` field for the generic targeting layer.
             | Effect::RevealFromHand { .. } => None,
@@ -6806,6 +6846,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
         Effect::Vote { .. } => "Vote",
+        Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
@@ -6977,6 +7018,8 @@ pub enum EffectKind {
     Clash,
     /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
     Vote,
+    /// CR 700.3: SeparateIntoPiles — partition objects into two piles, another player chooses one, sub-effect applies.
+    SeparateIntoPiles,
     SwitchPT,
     CopySpell,
     CopyTokenOf,
@@ -7148,6 +7191,7 @@ impl From<&Effect> for EffectKind {
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
             Effect::Vote { .. } => EffectKind::Vote,
+            Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,

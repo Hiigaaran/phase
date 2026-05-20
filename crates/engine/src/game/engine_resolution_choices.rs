@@ -72,6 +72,8 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
+            | WaitingFor::SeparatePilesPartition { .. }
+            | WaitingFor::SeparatePilesChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
@@ -594,6 +596,119 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
                     state, controller, events,
                 ))
+            }
+        }
+        // CR 700.3 + CR 700.3a + CR 101.4: Subject submits their partition;
+        // pile B is derived as `eligible \ pile_a`. Advance the subject queue
+        // (CR 800.4g — eliminated players were filtered out at resolver
+        // entry; if the next subject has been eliminated since, the
+        // `apnap_order_from` pass at resolution time guarantees they were
+        // never queued). When the queue empties, transition to the choice
+        // phase.
+        (
+            WaitingFor::SeparatePilesPartition {
+                player,
+                eligible,
+                mut remaining_subjects,
+                mut completed,
+                chooser,
+                chosen_pile_effect,
+                source_id,
+            },
+            GameAction::SubmitPilePartition { pile_a },
+        ) => {
+            // CR 700.3a: Validate the partition is a subset of `eligible`
+            // (no duplicates, no foreign ids). Empty `pile_a` is legal per
+            // CR 700.3d.
+            use std::collections::HashSet;
+            let eligible_set: HashSet<ObjectId> = eligible.iter().copied().collect();
+            let mut seen: HashSet<ObjectId> = HashSet::with_capacity(pile_a.len());
+            for id in &pile_a {
+                if !eligible_set.contains(id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "pile A contains object {id:?} not in eligible set"
+                    )));
+                }
+                if !seen.insert(*id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "pile A contains duplicate object {id:?}"
+                    )));
+                }
+            }
+            let pile_a_vec: crate::im::Vector<ObjectId> = pile_a.iter().copied().collect();
+            let pile_b_vec: crate::im::Vector<ObjectId> = eligible
+                .iter()
+                .copied()
+                .filter(|id| !seen.contains(id))
+                .collect();
+            completed.push_back(crate::types::game_state::PileResult {
+                subject: player,
+                pile_a: pile_a_vec,
+                pile_b: pile_b_vec,
+            });
+            if let Some((next_pid, next_pool)) = remaining_subjects.pop_front() {
+                state.waiting_for = WaitingFor::SeparatePilesPartition {
+                    player: next_pid,
+                    eligible: next_pool,
+                    remaining_subjects,
+                    completed,
+                    chooser,
+                    chosen_pile_effect,
+                    source_id,
+                };
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                // All subjects partitioned. Transition to chooser phase.
+                let (current, pending) = pop_first_pile_result(completed);
+                state.waiting_for = WaitingFor::SeparatePilesChoice {
+                    player: chooser,
+                    pending,
+                    current,
+                    chosen_pile_effect,
+                    source_id,
+                };
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            }
+        }
+        // CR 700.3 + CR 101.4c: Chooser picks pile A or B for the current
+        // subject. The chooser may resolve multiple subjects "in any order"
+        // (CR 101.4c) — the engine drains `pending` in completion order and
+        // each `ChoosePile` advances one step. When `pending` empties, the
+        // sub-effect (sacrifice for Make an Example) fans out over every
+        // chosen pile, scoped per subject as controller.
+        (
+            WaitingFor::SeparatePilesChoice {
+                player,
+                mut pending,
+                current,
+                chosen_pile_effect,
+                source_id,
+            },
+            GameAction::ChoosePile { pile },
+        ) => {
+            // CR 101.4c: Resolve this subject's chosen pile NOW (one
+            // `Sacrifice` per object), then either park for the next
+            // subject's choice or finish. Per-decision resolution matches
+            // CR 101.4c ("in any order they choose") — the chooser's
+            // submission order IS that order.
+            let _ = effects::separate_piles::apply_pile_effect(
+                state,
+                source_id,
+                &chosen_pile_effect,
+                &[(current, pile)],
+                events,
+            );
+            if let Some(next) = pending.pop_front() {
+                state.waiting_for = WaitingFor::SeparatePilesChoice {
+                    player,
+                    pending,
+                    current: next,
+                    chosen_pile_effect,
+                    source_id,
+                };
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
         (
@@ -1965,6 +2080,21 @@ fn starts_with_pay_amount_prompt(ability: &ResolvedAbility) -> bool {
         ),
         _ => false,
     }
+}
+
+/// CR 700.3: Pop the first `PileResult` from a completed ledger, returning
+/// it alongside the remaining queue. Helper for the partition→choice
+/// transition.
+fn pop_first_pile_result(
+    mut completed: crate::im::Vector<crate::types::game_state::PileResult>,
+) -> (
+    crate::types::game_state::PileResult,
+    crate::im::Vector<crate::types::game_state::PileResult>,
+) {
+    let first = completed
+        .pop_front()
+        .expect("at least one completed pile result");
+    (first, completed)
 }
 
 fn finish_with_continuation(

@@ -1234,6 +1234,35 @@ impl VoteActor {
     }
 }
 
+/// CR 700.3: Identifies one of the two piles produced by a
+/// `SeparateIntoPiles` partition. Typed rather than `bool` so the
+/// `GameAction::ChoosePile` payload and the engine handler share a
+/// self-documenting domain and the parser/AI cannot accidentally swap
+/// pile semantics. Pile A is the partitioner's chosen subset; pile B is
+/// `eligible \ pile_a`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PileSide {
+    A,
+    B,
+}
+
+/// CR 700.3 + CR 700.3a + CR 700.3d: One subject's completed partition.
+/// Both piles are present (CR 700.3a: the partition is exhaustive and
+/// disjoint), and either pile may be empty (CR 700.3d). Per CR 700.3b a
+/// pile is not a `GameObject` — these are transient `im::Vector` ledgers
+/// that live on the `WaitingFor` until the chooser picks a side and the
+/// pile sub-effect resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PileResult {
+    /// CR 700.3 + CR 101.4: The player whose objects were partitioned.
+    pub subject: PlayerId,
+    /// CR 700.3a: The partitioner-selected subset.
+    pub pile_a: im::Vector<ObjectId>,
+    /// CR 700.3a: `eligible \ pile_a`, derived by the partition handler.
+    pub pile_b: im::Vector<ObjectId>,
+}
+
 /// CR 118.9: Identifies which keyword ability granted an alternative casting
 /// cost so the `WaitingFor::AlternativeCastChoice` dispatcher can route to the
 /// keyword-specific post-payment handler. The four keywords share a single
@@ -2263,6 +2292,58 @@ pub enum WaitingFor {
         /// authorized to submit the next `ChooseOption`.
         actor: VoteActor,
     },
+    /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
+    /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
+    /// is submitted by `player` via `GameAction::SubmitPilePartition`; pile B
+    /// is derived as `eligible \ pile_a` by the handler. After each
+    /// submission the queue advances to the next subject in APNAP order
+    /// (CR 101.4b — each subject sees prior subjects' completed piles
+    /// before partitioning their own). When the subject queue empties, the
+    /// engine transitions to [`Self::SeparatePilesChoice`] for `chooser`.
+    SeparatePilesPartition {
+        /// The subject currently partitioning their own objects.
+        player: PlayerId,
+        /// CR 700.3 + CR 700.3a: Eligible objects controlled by `player`
+        /// that match the effect's `object_filter`. The partition must be
+        /// a subset of this set.
+        eligible: im::Vector<ObjectId>,
+        /// CR 101.4 + CR 800.4g: Remaining subjects still to partition, in
+        /// APNAP order from the active player. Each entry is paired with
+        /// that subject's pre-computed eligible set so the handler does not
+        /// need to re-walk the battlefield.
+        remaining_subjects: im::Vector<(PlayerId, im::Vector<ObjectId>)>,
+        /// CR 700.3a: Completed partitions accumulated so prior subjects'
+        /// pile shapes are visible to later subjects (CR 101.4b) and the
+        /// chooser can resolve each in turn.
+        completed: im::Vector<PileResult>,
+        /// CR 700.3: The player who will choose one pile per subject.
+        chooser: PlayerId,
+        /// CR 608.2c: Sub-effect applied to each chosen pile, once per
+        /// object, with the subject rebound as controller.
+        chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// Source ability's object ID — for logging and state filter echoes.
+        source_id: ObjectId,
+    },
+    /// CR 700.3 + CR 101.4c: The chooser picks one pile (A or B) per
+    /// completed `PileResult`. CR 101.4c allows the chooser to make
+    /// multiple simultaneous choices in any order; the engine drains the
+    /// `pending` queue in completion order and the chooser submits one
+    /// `GameAction::ChoosePile` per step. When the queue empties, the
+    /// chosen-pile sub-effect resolves once per object in each chosen pile.
+    SeparatePilesChoice {
+        /// The chooser (typically the spell controller).
+        player: PlayerId,
+        /// Subjects whose chosen pile has not yet been picked.
+        pending: im::Vector<PileResult>,
+        /// The subject currently being chosen for (head of the original
+        /// completed queue).
+        current: PileResult,
+        /// CR 608.2c: Sub-effect applied to each chosen pile, once per
+        /// object, with the subject rebound as controller.
+        chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// Source ability's object ID — for logging and state filter echoes.
+        source_id: ObjectId,
+    },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
@@ -2634,7 +2715,9 @@ impl WaitingFor {
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::MiracleCastOffer { player, .. }
             | WaitingFor::MadnessCastOffer { player, .. }
-            | WaitingFor::CommanderZoneChoice { player, .. } => Some(*player),
+            | WaitingFor::CommanderZoneChoice { player, .. }
+            | WaitingFor::SeparatePilesPartition { player, .. }
+            | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
             // cards), the ACTOR is the spell controller, not `player` (the
             // subject being labeled). `VoteActor::resolve` returns the

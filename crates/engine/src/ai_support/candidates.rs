@@ -929,6 +929,51 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         // with the player who is authorized to submit it; otherwise the
         // action gets routed to the wrong AI seat in multiplayer. The
         // `actor` field is always set to the authorized submitter.
+        // CR 700.3 + CR 700.3a: AI partition candidates. Full powerset is
+        // exponential, so we cap at three heuristics: all-in-A (chooser
+        // sees an empty pile B), all-in-B (chooser sees a full pile A),
+        // and an even split. These exercise the runtime path; deeper
+        // tactical partitioning is a deferred AI-improvement axis.
+        WaitingFor::SeparatePilesPartition {
+            player, eligible, ..
+        } => {
+            let elig: Vec<ObjectId> = eligible.iter().copied().collect();
+            let mut variants: Vec<Vec<ObjectId>> = Vec::new();
+            variants.push(Vec::new()); // all in pile B
+            variants.push(elig.clone()); // all in pile A
+            if elig.len() >= 2 {
+                let mid = elig.len() / 2;
+                variants.push(elig[..mid].to_vec());
+            }
+            variants
+                .into_iter()
+                .map(|pile_a| {
+                    candidate(
+                        GameAction::SubmitPilePartition { pile_a },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
+        // CR 700.3: AI pile-choice — both sides are legal. The evaluator
+        // picks the larger pile by default; the tactical layer can refine.
+        WaitingFor::SeparatePilesChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChoosePile {
+                    pile: crate::types::game_state::PileSide::A,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChoosePile {
+                    pile: crate::types::game_state::PileSide::B,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         WaitingFor::VoteChoice {
             options,
             actor,
