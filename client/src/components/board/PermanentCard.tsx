@@ -293,7 +293,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
   } else if (isValidTarget) {
     glowClass =
-      "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]";
+      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
   } else if (isActivatable) {
     glowClass =
       "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]";
@@ -620,6 +620,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           data-card-affordance-highlight="true"
           className={`pointer-events-none absolute inset-[-3px] z-30 rounded-xl ${glowClass}`}
         />
+      )}
+
+      {isValidTarget && (
+        <div
+          className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
+        >
+          Target
+        </div>
       )}
 
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.
