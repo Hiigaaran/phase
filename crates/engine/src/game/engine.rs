@@ -145,14 +145,24 @@ pub fn apply(
     state.exiled_from_hand_this_resolution = 0;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;
+    reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     mark_public_state_all_dirty(state);
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
+    reconcile_terminal_result(state, &mut result);
     remember_public_reveals(state, &result.events);
     finalize_public_state(state);
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
+}
+
+fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+    super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        match_flow::handle_game_over_transition(state);
+        result.waiting_for = state.waiting_for.clone();
+    }
 }
 
 fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
@@ -450,6 +460,41 @@ mod auto_pass_decision_tests {
         state.priority_passes.clear();
         state.priority_pass_count = 0;
         state
+    }
+
+    #[test]
+    fn apply_reconciles_eliminated_two_player_game_to_game_over() {
+        let mut state = priority_state();
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilEndOfTurn,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        )));
     }
 
     fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
