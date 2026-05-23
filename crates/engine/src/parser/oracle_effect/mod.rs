@@ -10208,6 +10208,18 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
     }
 }
 
+fn lift_each_player_exile_top_scope(effect: &mut Effect, player_scope: &mut Option<PlayerFilter>) {
+    if player_scope.is_some() {
+        return;
+    }
+    if let Effect::ExileTop { player, .. } = effect {
+        if matches!(player, TargetFilter::ScopedPlayer) {
+            *player = TargetFilter::Controller;
+            *player_scope = Some(PlayerFilter::All);
+        }
+    }
+}
+
 fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
     if matches!(
         &*def.effect,
@@ -11572,6 +11584,12 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        // CR 608.2: `parse_exile_ast` uses `ScopedPlayer` as the structural
+        // marker for "each player's library". Lower it into the same
+        // player_scope-driven shape used by Evelyn/Jeleva-class effects:
+        // the resolver iterates all players and `Controller` reads the
+        // rebound per-player controller.
+        lift_each_player_exile_top_scope(&mut clause.effect, &mut player_scope);
         // CR 109.5: For a "for each opponent who doesn't" decline body, rebind
         // every recipient-bearing node so "that player" → ScopedPlayer and
         // "you" → OriginalController resolve relative to the per-opponent
@@ -34393,6 +34411,19 @@ mod tests {
         let def = super::parse_effect_chain(
             "exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
             AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected all-player ExileTop to use player_scope + Controller, got {:?}",
+            def.effect
         );
         // Walk the chain looking for the CastFromZone with alt_ability_cost set.
         fn find_cast(d: &AbilityDefinition) -> Option<&Effect> {
