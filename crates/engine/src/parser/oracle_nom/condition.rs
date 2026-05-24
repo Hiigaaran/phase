@@ -5546,6 +5546,38 @@ mod tests {
     }
 
     #[test]
+    fn test_control_count_ge_fixed_land_subtype() {
+        let (rest, c) = parse_inner_condition("you control five or more towns").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => {
+                assert!(
+                    typed
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Town".to_string())),
+                    "expected Town subtype filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(typed.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }));
+            }
+            other => panic!("expected ObjectCount Town GE 5, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_graveyard_count_ge() {
         let (rest, c) =
             parse_inner_condition("you have five or more cards in your graveyard").unwrap();
