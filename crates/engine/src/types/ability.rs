@@ -6988,6 +6988,18 @@ impl TargetFilter {
         }
     }
 
+    pub fn contains_source_attachment_host(&self) -> bool {
+        match self {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::EnchantedBy | FilterProp::EquippedBy)),
+            TargetFilter::And { filters } => filters
+                .iter()
+                .any(TargetFilter::contains_source_attachment_host),
+            _ => false,
+        }
+    }
+
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
     /// parent target anaphora, and self-references resolve automatically

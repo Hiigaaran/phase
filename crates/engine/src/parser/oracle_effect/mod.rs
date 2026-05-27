@@ -13161,6 +13161,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                 &mut instead.effect,
                                 &last_def.effect,
                             );
+                            if rewrite_counter_instead_target_from_antecedent(
+                                &mut instead.effect,
+                                &last_def.effect,
+                            ) {
+                                instead.target_choice_timing = last_def.target_choice_timing;
+                            }
                             last_def.sub_ability = Some(Box::new(instead));
                             defs.push(last_def);
                         }
@@ -13772,6 +13778,14 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
 }
 
 fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
+        let lower = clause_ir.source_text.to_ascii_lowercase();
+        if !nom_primitives::scan_contains(&lower, "target ")
+            && target.contains_source_attachment_host()
+        {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. }) {
         let lower = clause_ir.source_text.to_ascii_lowercase();
         if !nom_primitives::scan_contains(&lower, "target ") {
@@ -13924,6 +13938,31 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
     if let Some(effect) = new_effect {
         *cur = effect;
     }
+}
+
+fn rewrite_counter_instead_target_from_antecedent(cur: &mut Effect, antecedent: &Effect) -> bool {
+    let Effect::PutCounter {
+        target: current_target,
+        ..
+    } = cur
+    else {
+        return false;
+    };
+    if !matches!(current_target, TargetFilter::SelfRef) {
+        return false;
+    }
+    let Effect::PutCounter {
+        target: antecedent_target,
+        ..
+    } = antecedent
+    else {
+        return false;
+    };
+    if antecedent_target.contains_source_attachment_host() {
+        *current_target = antecedent_target.clone();
+        return true;
+    }
+    false
 }
 
 /// Match an `Unimplemented` effect whose description is
@@ -17847,7 +17886,8 @@ mod tests {
         CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
         LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty,
         ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, SearchSelectionConstraint, TypeFilter, TypedFilter, ZoneRef,
+        QuantityRef, SearchSelectionConstraint, TargetChoiceTiming, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -29280,6 +29320,33 @@ mod tests {
             }
             _ => panic!("Expected PutCounter, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn equipped_creature_counter_instead_reuses_attachment_host_target() {
+        let def = parse_effect_chain(
+            "Put a +1/+1 counter on equipped creature. If equipped creature is a Vampire, put two +1/+1 counters on it instead.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.target_choice_timing, TargetChoiceTiming::Resolution);
+        let Effect::PutCounter { target, .. } = def.effect.as_ref() else {
+            panic!("expected base PutCounter, got {:?}", def.effect);
+        };
+        assert!(target.contains_source_attachment_host());
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional instead counter branch");
+        assert_eq!(sub.target_choice_timing, TargetChoiceTiming::Resolution);
+        assert!(matches!(
+            sub.condition,
+            Some(AbilityCondition::ConditionInstead { .. })
+        ));
+        let Effect::PutCounter { target, .. } = sub.effect.as_ref() else {
+            panic!("expected replacement PutCounter, got {:?}", sub.effect);
+        };
+        assert!(target.contains_source_attachment_host());
     }
 
     #[test]
