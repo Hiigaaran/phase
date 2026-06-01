@@ -499,11 +499,14 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-      IMAGE_NAME: ghcr.io/${{ github.repository_owner | lower }}/phase-server
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_SHA }}
+
+      - name: Lowercase IMAGE_NAME (GHCR requires lowercase)
+        run: echo "IMAGE_NAME=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
 
       - name: Download card data
         uses: actions/download-artifact@v4
@@ -990,7 +993,7 @@ jobs:
       packages: read
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
-      IMAGE_NAME: ghcr.io/${{ github.repository_owner | lower }}/phase-server
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
     steps:
       - name: Set up SSH
         run: |
