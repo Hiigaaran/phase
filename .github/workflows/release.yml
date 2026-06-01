@@ -915,6 +915,23 @@ jobs:
         if: steps.macos-signing.outputs.skip != 'true'
         run: cd client && pnpm install --frozen-lockfile
 
+      - name: Set Tauri signing env (only when secret is configured)
+        if: steps.macos-signing.outputs.skip != 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIGNING_PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # Passing an empty TAURI_SIGNING_PRIVATE_KEY env var causes tauri to
+          # attempt key parsing and fail. Only inject it when the secret has a
+          # real value; otherwise leave it unset so tauri skips signing entirely.
+          if [ -n "$SIGNING_KEY" ]; then
+            printf 'TAURI_SIGNING_PRIVATE_KEY=%s\n' "$SIGNING_KEY" >> "$GITHUB_ENV"
+            printf 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD=%s\n' "$SIGNING_PWD" >> "$GITHUB_ENV"
+          else
+            echo "::notice::TAURI_SIGNING_PRIVATE_KEY not configured — building without updater signing."
+          fi
+        shell: bash
+
       - name: Build Tauri
         if: steps.macos-signing.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@v0
@@ -929,8 +946,9 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # TAURI_SIGNING_PRIVATE_KEY / PASSWORD are injected via GITHUB_ENV by
+          # the step above only when the secrets are actually configured. Never
+          # pass them directly here — an empty string triggers a parse failure.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
