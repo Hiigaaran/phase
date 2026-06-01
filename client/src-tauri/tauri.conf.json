@@ -38,7 +38,7 @@
       "../public/card-data.json": "data/card-data.json",
       "../public/draft-pools.json": "data/draft-pools.json"
     },
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": false
   },
   "plugins": {
     "updater": {
