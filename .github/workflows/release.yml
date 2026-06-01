@@ -342,11 +342,23 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      - name: Check Cloudflare credentials
+        id: cf-check
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CF_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CLOUDFLARE_API_TOKEN not set — skipping R2 upload and verification."
+          fi
+
       - name: Upload data to R2
         # Single source of truth: data-files.json at the repo root drives this
         # loop, the verify step below, and vite.config.ts URL defines.
         # Skipped on forks that have no Cloudflare secrets configured.
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: steps.cf-check.outputs.available == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -365,8 +377,7 @@ jobs:
           done < <(jq -r '.[]' data-files.json)
 
       - name: Verify R2 uploads landed
-        # Only runs when the upload step ran (same Cloudflare secret guard).
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: steps.cf-check.outputs.available == 'true'
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
@@ -544,7 +555,6 @@ jobs:
   deploy-production:
     name: Deploy Production (Cloudflare Pages)
     needs: [build-wasm, release]
-    if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -580,7 +590,6 @@ jobs:
     # (scripts/build-broker-wasm.sh), so the rust/wasm toolchain must be on PATH.
     name: Deploy Lobby Worker (Cloudflare)
     needs: [resolve-release-ref]
-    if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
