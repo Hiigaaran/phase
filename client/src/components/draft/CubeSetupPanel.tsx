@@ -89,7 +89,14 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     try {
       await onStart({ cubeName, cubeListText: cubeText, settings });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("cubeSetup.startError"));
+      // WASM throws string JsValues (not Error objects), so check typeof as well.
+      setError(
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : t("cubeSetup.startError"),
+      );
     } finally {
       setLoading(false);
     }

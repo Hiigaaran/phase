@@ -29,20 +29,29 @@ pub fn parse_cube_list(text: &str) -> Result<Vec<CubeListEntry>, Vec<CubeImportE
 
     for (idx, raw_line) in text.lines().enumerate() {
         let line = raw_line.trim();
-        if line.is_empty() {
+        // Skip empty lines and comment/section-header lines (e.g. "# mainboard").
+        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
             continue;
         }
 
-        let Some((count_text, name)) = line.split_once(char::is_whitespace) else {
-            errors.push(CubeImportError::InvalidLine { line: idx + 1 });
-            continue;
+        // Accept both "<count> <name>" (e.g. "1 Lightning Bolt") and plain
+        // "<name>" (e.g. "Lightning Bolt") — the latter is the standard
+        // CubeCobra text-export format where every card appears exactly once.
+        let (count, name) = match line.split_once(char::is_whitespace) {
+            Some((count_text, rest)) => match count_text.parse::<u32>() {
+                Ok(n) if n > 0 => (n, rest.trim()),
+                Ok(_) => {
+                    errors.push(CubeImportError::InvalidLine { line: idx + 1 });
+                    continue;
+                }
+                // First token is not a number — treat the whole line as a name.
+                Err(_) => (1, line),
+            },
+            // No whitespace — the entire line is the card name.
+            None => (1, line),
         };
-        let Ok(count) = count_text.parse::<u32>() else {
-            errors.push(CubeImportError::InvalidLine { line: idx + 1 });
-            continue;
-        };
-        let name = name.trim();
-        if count == 0 || name.is_empty() {
+
+        if name.is_empty() {
             errors.push(CubeImportError::InvalidLine { line: idx + 1 });
             continue;
         }
@@ -245,6 +254,35 @@ mod tests {
         assert_eq!(entries[0].count, 1);
         assert_eq!(entries[1].name, "Island");
         assert_eq!(entries[1].count, 2);
+    }
+
+    #[test]
+    fn parses_cubecobra_text_export_format() {
+        let text = "# mainboard\nSolitude\nLightning Bolt\n\n# sideboard\nIsland\n";
+        let entries = parse_cube_list(text).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "Solitude");
+        assert_eq!(entries[0].count, 1);
+        assert_eq!(entries[1].name, "Lightning Bolt");
+        assert_eq!(entries[1].count, 1);
+        assert_eq!(entries[2].name, "Island");
+        assert_eq!(entries[2].count, 1);
+    }
+
+    #[test]
+    fn parses_multiword_card_names_without_count() {
+        let entries = parse_cube_list("Esper Sentinel\nBlack Lotus\n").unwrap();
+        assert_eq!(entries[0].name, "Esper Sentinel");
+        assert_eq!(entries[0].count, 1);
+        assert_eq!(entries[1].name, "Black Lotus");
+        assert_eq!(entries[1].count, 1);
+    }
+
+    #[test]
+    fn skips_comment_and_empty_lines() {
+        let entries = parse_cube_list("// My cube\n\n# section\n1 Counterspell\n").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Counterspell");
     }
 
     #[test]
