@@ -499,7 +499,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner | lower }}/phase-server
     steps:
       - uses: actions/checkout@v4
         with:
@@ -972,7 +972,7 @@ jobs:
       packages: read
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
-      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner | lower }}/phase-server
     steps:
       - name: Set up SSH
         run: |
