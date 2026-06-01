@@ -1645,6 +1645,17 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::MoreThanMeetsTheEye => {
+                    casting::handle_mtmte_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
             }
         }
         (

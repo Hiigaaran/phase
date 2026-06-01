@@ -1325,6 +1325,9 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Cleave => {
                     "AlternativeCastChoice(Cleave)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::MoreThanMeetsTheEye => {
+                    "AlternativeCastChoice(MoreThanMeetsTheEye)"
+                }
             },
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
             WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
